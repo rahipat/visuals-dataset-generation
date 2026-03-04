@@ -139,11 +139,6 @@ def clipped_zoom(img, zoom_factor):
     return img[trim_top:trim_top + h, trim_left:trim_left + w]
 
 
-# /////////////// End Corruption Helpers ///////////////
-
-
-# /////////////// Corruptions ///////////////
-
 def _clamp01(value):
     return max(0.0, min(1.0, float(value)))
 
@@ -659,8 +654,6 @@ def rain(x, severity=1):
     return np.array(x)
 
 
-# Add normalized intensity support to corruption filters.
-# Each wrapped function now accepts `intensity` in [0, 1].
 _INTENSITY_WRAPPED_FILTERS = [
     "gaussian_noise",
     "shot_noise",
@@ -692,4 +685,3 @@ for _filter_name in _INTENSITY_WRAPPED_FILTERS:
         globals()[_filter_name] = _wrap_corruption_with_intensity(globals()[_filter_name])
 
 
-# /////////////// End Corruptions ///////////////
