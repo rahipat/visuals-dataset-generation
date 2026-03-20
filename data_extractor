@@ -1,0 +1,241 @@
+import os
+import csv
+import argparse
+import logging
+
+#clear error if Waymo / TF are not installed
+
+try:
+    import tensorflow as tf
+    from waymo_open_dataset import dataset_pb2
+except ImportError as e:
+    raise SystemExit(
+        f"\n[ERROR] Missing dependency: {e}\n"
+        "Install with:\n"
+        "  pip install waymo-open-dataset-tf-2-12-0 tensorflow\n"
+    )
+
+OBJECT_TYPE_MAP = {
+    0: "unknown",
+    1: "vehicle",
+    2: "pedestrian",
+    3: "sign",
+    4: "cyclist",
+}
+
+CSV_HEADER = [
+    "timestamp_s", "source", "object_id", "object_type",
+    "center_x", "center_y", "center_z",
+    "length", "width", "height", "heading_rad",
+    "vel_x", "vel_y",
+    "rel_x", "rel_y", "distance_m",
+    "ego_x", "ego_y", "ego_z",
+    "cam_box_center_x", "cam_box_center_y",
+    "lidar_extrinsic",
+    "camera_intrinsics",
+    "camera_extrinsic",
+]
+
+#Calibration extraction
+
+def extract_calibrations(frame: "dataset_pb2.Frame"):
+    """Return (cam_calibrations, lidar_calibrations) dicts for a frame."""
+    cam_cals = {}
+    for cal in frame.context.camera_calibrations:
+        name = dataset_pb2.CameraName.Name.Name(cal.name)
+        cam_cals[name] = {
+            "intrinsics": list(cal.intrinsic),
+            "extrinsic":  list(cal.extrinsic.transform),
+        }
+
+    lidar_cals = {}
+    for cal in frame.context.laser_calibrations:
+        name = dataset_pb2.LaserName.Name.Name(cal.name)
+        lidar_cals[name] = {
+            "extrinsic": list(cal.extrinsic.transform),
+        }
+
+    return cam_cals, lidar_cals
+
+# Per-frame processing
+
+def process_frame(frame, csv_writer, cam_cals, lidar_cals):
+    """Write one row per LiDAR label and one row per camera label."""
+    timestamp = frame.timestamp_micros / 1e6
+    pose  = list(frame.pose.transform)
+    ego_x, ego_y, ego_z = pose[3], pose[7], pose[11]
+
+    # ---- LiDAR 3-D boxes -----------------------------------------------
+    for label in frame.laser_labels:
+        b     = label.box
+        rel_x = b.center_x - ego_x
+        rel_y = b.center_y - ego_y
+        dist  = (rel_x ** 2 + rel_y ** 2) ** 0.5
+
+        lidar_extrinsic = lidar_cals.get("TOP", {}).get("extrinsic", "")
+
+        has_meta = label.HasField("metadata")
+        vel_x    = label.metadata.speed_x if has_meta else ""
+        vel_y    = label.metadata.speed_y if has_meta else ""
+
+        csv_writer.writerow([
+            round(timestamp, 6), "lidar", label.id,
+            OBJECT_TYPE_MAP.get(label.type, str(label.type)),
+            round(b.center_x, 4), round(b.center_y, 4), round(b.center_z, 4),
+            round(b.length,   4), round(b.width,    4), round(b.height,   4),
+            round(b.heading,  6),
+            vel_x, vel_y,
+            round(rel_x, 4), round(rel_y, 4), round(dist, 4),
+            round(ego_x, 4), round(ego_y, 4), round(ego_z, 4),
+            "", "",                              # no camera box columns
+            lidar_extrinsic,
+            "", "",                              # no camera calibration columns
+        ])
+
+    # ---- Camera 2-D boxes ----------------------------------------------
+    for cam_labels in frame.camera_labels:
+        cam_name = dataset_pb2.CameraName.Name.Name(cam_labels.name)
+        cam_cal  = cam_cals.get(cam_name, {})
+
+        for label in cam_labels.labels:
+            b = label.box
+            csv_writer.writerow([
+                round(timestamp, 6), f"camera_{cam_name}", label.id,
+                OBJECT_TYPE_MAP.get(label.type, str(label.type)),
+                "", "", "",                      # no LiDAR 3-D box columns
+                "", "", "", "",
+                "", "",
+                "", "", "",
+                round(ego_x, 4), round(ego_y, 4), round(ego_z, 4),
+                round(b.center_x, 4), round(b.center_y, 4),
+                "",                              # no LiDAR extrinsic
+                cam_cal.get("intrinsics", ""),
+                cam_cal.get("extrinsic",  ""),
+            ])
+
+# Per-file processing
+
+def process_tfrecord(file_path: str, csv_writer, logger: logging.Logger):
+    """Iterate every frame in a .tfrecord file and write rows to csv_writer."""
+    dataset = tf.data.TFRecordDataset(file_path, compression_type="")
+    cam_cals, lidar_cals = {}, {}
+    cal_extracted = False
+    frame_count = 0
+
+    for raw_record in dataset:
+        try:
+            frame = dataset_pb2.Frame()
+            frame.ParseFromString(raw_record.numpy())
+
+            if not cal_extracted:
+                cam_cals, lidar_cals = extract_calibrations(frame)
+                cal_extracted = True
+
+            process_frame(frame, csv_writer, cam_cals, lidar_cals)
+            frame_count += 1
+
+        except Exception as exc:                          # skip corrupted frames
+            logger.warning(f"  Skipping bad frame in {os.path.basename(file_path)}: {exc}")
+
+    logger.info(f"  {frame_count} frames processed.")
+
+# CLI
+
+def parse_args():
+    repo_root    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    default_data = os.path.join(repo_root, "dataset")
+
+    parser = argparse.ArgumentParser(
+        description="Waymo Step 1 Extractor — LiDAR boxes, Camera boxes, Calibrations → CSV"
+    )
+    parser.add_argument(
+        "--dataset-root", default=default_data,
+        help="Root folder containing .tfrecord files (default: <repo>/dataset/)"
+    )
+    parser.add_argument(
+        "--split", default="training",
+        choices=["training", "validation", "test"],
+        help="Dataset split subfolder to scan (default: training)"
+    )
+    parser.add_argument(
+        "--output", default="output_step1.csv",
+        help="Output CSV file path (default: output_step1.csv)"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Enable verbose logging"
+    )
+    return parser.parse_args()
+
+
+# Entry point
+
+def main():
+    args = parse_args()
+
+    # Logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(format="%(levelname)s: %(message)s", level=log_level)
+    logger = logging.getLogger(__name__)
+
+    # Resolve data folder — support both flat and split-subfolder layouts
+    data_folder = args.dataset_root
+    split_subfolder = os.path.join(data_folder, args.split)
+    if os.path.isdir(split_subfolder):
+        data_folder = split_subfolder
+
+    if not os.path.isdir(data_folder):
+        raise SystemExit(
+            f"\n[ERROR] Dataset folder not found: {data_folder}\n"
+            "Place your .tfrecord files under <repo>/dataset/ "
+            "or pass --dataset-root to specify a custom path.\n"
+        )
+
+    # Collect .tfrecord files (exclude testing split by convention)
+    tfrecord_files = sorted([
+        os.path.join(data_folder, f)
+        for f in os.listdir(data_folder)
+        if f.endswith(".tfrecord") and "testing" not in f
+    ])
+
+    if not tfrecord_files:
+        raise SystemExit(
+            f"\n[ERROR] No .tfrecord files found in: {data_folder}\n"
+            "Run cache_waymo_subset.py first, or check --dataset-root.\n"
+        )
+
+    logger.info(f"Found {len(tfrecord_files)} .tfrecord file(s) in: {data_folder}")
+    logger.debug("Files: " + ", ".join(os.path.basename(f) for f in tfrecord_files))
+
+    # Write CSV
+    output_path = args.output
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    total_rows = 0
+    with open(output_path, mode="w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(CSV_HEADER)
+
+        for tf_file in tfrecord_files:
+            logger.info(f"Processing: {os.path.basename(tf_file)}")
+            before = writer.dialect  # just a handle — count rows manually
+            rows_before = csv_file.tell()
+            process_tfrecord(tf_file, writer, logger)
+
+    logger.info(f"Done. CSV saved to: {output_path}")
+
+    # Quick summary
+    try:
+        import pandas as pd
+        df = pd.read_csv(output_path)
+        logger.info(f"Total rows : {df.shape[0]}")
+        logger.info(f"Sources    :\n{df['source'].value_counts().to_string()}")
+        if args.verbose:
+            print("\nFirst 5 rows:")
+            print(df.head(5).to_string(index=False))
+    except ImportError:
+        logger.debug("pandas not installed — skipping summary preview.")
+
+
+if __name__ == "__main__":
+    main()
