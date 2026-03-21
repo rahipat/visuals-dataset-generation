@@ -46,12 +46,18 @@ from parquet_component_loader import (  # type: ignore  # noqa: E402
 CLOUD_DATASET_BASE = "gs://waymo_open_dataset_v_2_0_1"
 DEFAULT_LOCAL_DATASET_ROOT = PROJECT_ROOT / "dataset"
 METADATA_COMPONENTS = list(DEFAULT_METADATA_COMPONENTS)
+DEFAULT_SKIPPED_CAMERA_NAMES = {"SIDE_LEFT", "SIDE_RIGHT"}
+
+
+def _normalize_camera_name(camera_name: Any) -> str:
+    return str(camera_name).strip().upper()
 
 
 def fetch_camera_images(
     dataset_base: str,
     split: str = "training",
     max_files: Optional[int] = None,
+    skip_camera_names: Optional[List[str]] = None,
     verbose: bool = False,
 ) -> List[Dict[str, Any]]:
     """Read camera image component rows and convert them to image records."""
@@ -64,6 +70,22 @@ def fetch_camera_images(
     )
     if camera_df.empty:
         print("[warn] No camera image rows found.")
+        return []
+
+    skipped = {_normalize_camera_name(name) for name in (skip_camera_names or []) if str(name).strip()}
+    if skipped and "key.camera_name" in camera_df.columns:
+        before_count = len(camera_df)
+        keep_mask = ~camera_df["key.camera_name"].map(_normalize_camera_name).isin(skipped)
+        camera_df = camera_df.loc[keep_mask]
+        removed_count = before_count - len(camera_df)
+        if verbose or removed_count:
+            print(
+                "[info] Skipped %d camera_image rows for cameras: %s"
+                % (removed_count, ", ".join(sorted(skipped)))
+            )
+
+    if camera_df.empty:
+        print("[warn] No camera image rows left after camera filtering.")
         return []
 
     records = []
@@ -161,21 +183,15 @@ def apply_degradations_and_save(
         )
     )
 
-    current_segment: Optional[str] = None
-    scene_meta_dir: Path = out_dir  # placeholder, set per segment
-    image_meta_dir: Path = out_dir  # placeholder, set per segment
+    meta_dir = out_dir / "metadata"
+    scene_meta_dir = meta_dir / "scene_metadata"
+    image_meta_dir = meta_dir / "image_metadata"
+    scene_meta_dir.mkdir(parents=True, exist_ok=True)
+    image_meta_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, record in indexed_images:
         segment = str(record.get("segment_context_name", "unknown"))
         timestamp = int(record.get("timestamp_micros", 0))
-
-        if segment != current_segment:
-            segment_dir = out_dir / ("segment_" + segment)
-            scene_meta_dir = segment_dir / "metadata" / "scene_metadata"
-            image_meta_dir = segment_dir / "metadata" / "image_metadata"
-            scene_meta_dir.mkdir(parents=True, exist_ok=True)
-            image_meta_dir.mkdir(parents=True, exist_ok=True)
-            current_segment = segment
         camera_name = str(record.get("camera_name", "unknown"))
         frame_key = build_frame_key(segment, timestamp)
         scene_name = build_scene_name(segment, timestamp)
@@ -217,7 +233,7 @@ def apply_degradations_and_save(
             print("[debug] Reusing metadata components for frame %s" % frame_key)
 
         try:
-            clear_dir = segment_dir / "clear"
+            clear_dir = out_dir / "clear"
             clear_dir.mkdir(parents=True, exist_ok=True)
             clear_path = clear_dir / ("%s.%s" % (base_name, image_format.lower()))
             clear_path.write_bytes(encode_image(pil_img, format=image_format))
@@ -269,7 +285,7 @@ def apply_degradations_and_save(
 
         aug_map = augmenter.apply_all(pil_img)
         for aug_name, aug_img in aug_map.items():
-            dest_dir = segment_dir / aug_name
+            dest_dir = out_dir / aug_name
             dest_dir.mkdir(parents=True, exist_ok=True)
             img_path = dest_dir / ("%s.%s" % (base_name, image_format.lower()))
             img_path.write_bytes(encode_image(aug_img, format=image_format))
@@ -310,6 +326,11 @@ def main() -> None:
         default=str(DEFAULT_LOCAL_DATASET_ROOT),
         help="Local dataset root. Can be .../dataset or .../dataset/waymo_open_dataset_v_2_0_1",
     )
+    parser.add_argument(
+        "--include-ultrawide",
+        action="store_true",
+        help="Include SIDE_LEFT and SIDE_RIGHT camera images.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Verbose logging.")
     args = parser.parse_args()
 
@@ -328,10 +349,18 @@ def main() -> None:
         print("[info] Data source mode: local (%s)" % dataset_base)
 
     print("[info] Fetching images from split: %s" % args.split)
+    skip_camera_names: List[str] = []
+    if not args.include_ultrawide:
+        skip_camera_names.extend(sorted(DEFAULT_SKIPPED_CAMERA_NAMES))
+        print(
+            "[info] Skipping ultrawide cameras by default: %s"
+            % ", ".join(sorted(DEFAULT_SKIPPED_CAMERA_NAMES))
+        )
     images = fetch_camera_images(
         dataset_base=dataset_base,
         split=args.split,
         max_files=args.max_files,
+        skip_camera_names=skip_camera_names,
         verbose=args.verbose,
     )
     if not images:
@@ -386,4 +415,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
