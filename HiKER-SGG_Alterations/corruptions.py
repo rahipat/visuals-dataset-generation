@@ -20,6 +20,7 @@ import warnings
 import os
 import sys
 import math
+import functools
 import arcade
 from arcade.experimental import Shadertoy
 
@@ -138,10 +139,58 @@ def clipped_zoom(img, zoom_factor):
     return img[trim_top:trim_top + h, trim_left:trim_left + w]
 
 
-# /////////////// End Corruption Helpers ///////////////
+def _clamp01(value):
+    return max(0.0, min(1.0, float(value)))
 
 
-# /////////////// Corruptions ///////////////
+def _intensity_to_severity(intensity):
+    # Map [0, 1] to integer severity levels [1, 5].
+    return int(round(1.0 + 4.0 * _clamp01(intensity)))
+
+
+def _default_intensity_from_severity(severity):
+    sev = max(1, min(5, int(severity)))
+    return (sev - 1) / 4.0
+
+
+def _as_rgb_float255(arr):
+    out = np.asarray(arr, dtype=np.float32)
+    if out.ndim == 2:
+        out = np.stack([out, out, out], axis=-1)
+    if out.shape[-1] > 3:
+        out = out[..., :3]
+    if out.max() <= 1.5:
+        out = out * 255.0
+    return out
+
+
+def _blend_by_intensity(original_image, corrupted_image, intensity):
+    level = _clamp01(intensity)
+    if level >= 0.999:
+        return corrupted_image
+
+    orig = _as_rgb_float255(np.asarray(original_image))
+    corr = _as_rgb_float255(corrupted_image)
+    if corr.shape[:2] != orig.shape[:2]:
+        corr = cv2.resize(corr, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    mixed = orig * (1.0 - level) + corr * level
+    return np.clip(mixed, 0, 255)
+
+
+def _wrap_corruption_with_intensity(fn):
+    @functools.wraps(fn)
+    def wrapped(x, *args, severity=1, intensity=None, **kwargs):
+        chosen_intensity = (
+            _default_intensity_from_severity(severity)
+            if intensity is None
+            else _clamp01(intensity)
+        )
+        mapped_severity = _intensity_to_severity(chosen_intensity)
+        corrupted = fn(x, *args, severity=mapped_severity, **kwargs)
+        return _blend_by_intensity(x, corrupted, chosen_intensity)
+
+    return wrapped
 
 def gaussian_noise(x, severity=1):
     c = [.08, .12, 0.18, 0.26, 0.38][severity - 1]
@@ -172,15 +221,10 @@ def speckle_noise(x, severity=1):
 
 
 def fgsm(x, source_net, severity=1):
-    c = [8, 16, 32, 64, 128][severity - 1]
-
-    x = V(x, requires_grad=True)
-    logits = source_net(x)
-    source_net.zero_grad()
-    loss = F.cross_entropy(logits, V(logits.data.max(1)[1].squeeze_()), size_average=False)
-    loss.backward()
-
-    return standardize(torch.clamp(unstandardize(x.data) + c / 255. * unstandardize(torch.sign(x.grad.data)), 0, 1))
+    raise NotImplementedError(
+        "fgsm is not supported in this runtime. It depends on torch and "
+        "project-specific helpers (V, F, standardize, unstandardize) that are not defined here."
+    )
 
 
 def gaussian_blur(x, severity=1):
@@ -610,4 +654,34 @@ def rain(x, severity=1):
     return np.array(x)
 
 
-# /////////////// End Corruptions ///////////////
+_INTENSITY_WRAPPED_FILTERS = [
+    "gaussian_noise",
+    "shot_noise",
+    "impulse_noise",
+    "speckle_noise",
+    "gaussian_blur",
+    "glass_blur",
+    "defocus_blur",
+    "motion_blur",
+    "zoom_blur",
+    "fog",
+    "frost",
+    "snow",
+    "spatter",
+    "contrast",
+    "brightness",
+    "saturate",
+    "jpeg_compression",
+    "pixelate",
+    "elastic_transform",
+    "sunglare",
+    "waterdrop",
+    "wildfire_smoke",
+    "dust",
+    "rain",
+]
+for _filter_name in _INTENSITY_WRAPPED_FILTERS:
+    if _filter_name in globals():
+        globals()[_filter_name] = _wrap_corruption_with_intensity(globals()[_filter_name])
+
+
