@@ -42,6 +42,28 @@ def _get_asset_root():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _random_overlay_transform(overlay, width, height, crop_ratio=1.0, rotation_choices=None):
+    """Sample a shifted crop and optional rotation to avoid fixed overlay patterns."""
+    overlay = overlay.copy()
+
+    if rotation_choices:
+        rotation = rotation_choices[np.random.randint(len(rotation_choices))]
+        if rotation:
+            overlay = overlay.rotate(rotation, resample=PILImage.BICUBIC, expand=True)
+
+    crop_ratio = max(float(crop_ratio), 1e-3)
+    crop_width = min(overlay.size[0], max(1, int(round(overlay.size[0] * crop_ratio))))
+    crop_height = min(overlay.size[1], max(1, int(round(overlay.size[1] * crop_ratio))))
+
+    max_left = max(overlay.size[0] - crop_width, 0)
+    max_top = max(overlay.size[1] - crop_height, 0)
+    left = np.random.randint(0, max_left + 1) if max_left else 0
+    top = np.random.randint(0, max_top + 1) if max_top else 0
+
+    overlay = overlay.crop((left, top, left + crop_width, top + crop_height))
+    return overlay.resize((width, height), PILImage.LANCZOS)
+
+
 def disk(radius, alias_blur=0.1, dtype=np.float32):
     if radius <= 8:
         L = np.arange(-8, 8 + 1)
@@ -320,26 +342,29 @@ def frost(x, severity=1):
          (0.7, 0.7),
          (0.65, 0.7),
          (0.6, 0.75)][severity - 1]
-    # idx = np.random.randint(5)
 
     width, height = x.size
     root_path = _get_asset_root() + os.sep
-    frost = cv2.imread(root_path + 'frost' + os.sep + 'frostlarge.jpg')
-    if frost is None:
+    frost_dir = root_path + 'frost'
+    frost_candidates = sorted(
+        file_name for file_name in os.listdir(frost_dir)
+        if file_name.lower().endswith(('.png', '.jpg', '.jpeg'))
+    )
+    if not frost_candidates:
         raise FileNotFoundError("frost texture not found")
 
-    frost_h, frost_w = frost.shape[:2]
-    if frost_h >= height and frost_w >= width:
-        # Crop a random window when the texture is big enough.
-        top = np.random.randint(0, frost_h - height + 1) if frost_h > height else 0
-        left = np.random.randint(0, frost_w - width + 1) if frost_w > width else 0
-        frost = frost[top:top + height, left:left + width]
-    else:
-        # Upscale smaller textures to avoid shape mismatch on high-res frames.
-        frost = cv2.resize(frost, (width, height), interpolation=cv2.INTER_CUBIC)
+    frost_name = frost_candidates[np.random.randint(len(frost_candidates))]
+    frost = PILImage.open(frost_dir + os.sep + frost_name).convert('RGBA')
+    frost = _random_overlay_transform(
+        frost,
+        width,
+        height,
+        crop_ratio=np.random.uniform(0.75, 1.0),
+        rotation_choices=[0, 0, 0, 90, 180, 270, -15, 15],
+    )
 
-    # Convert BGR -> RGB and blend. Keep frost overlay at 50% of original strength.
-    frost = frost[..., [2, 1, 0]].astype(np.float32)
+    # Blend the transformed frost texture into the RGB frame.
+    frost = np.array(frost.convert('RGB'), dtype=np.float32)
     x_arr = np.array(x, dtype=np.float32)
     frost_weight = 0.5 * c[1]
     return np.clip(c[0] * x_arr + frost_weight * frost, 0, 255)
@@ -518,11 +543,13 @@ def sunglare(x, severity=1):
     width, height = x.size
     root_path = _get_asset_root() + os.sep
     sunglare = PILImage.open(root_path + 'corruption_filter' + os.sep + 'sunglare.png').convert('RGBA')
-    margin = (1 - c) / 2
-    # crop the middle part of the sunglare with ratio
-    sunglare = sunglare.crop((sunglare.size[0] * margin, sunglare.size[1] * margin, sunglare.size[0] * (1 - margin), sunglare.size[1] * (1 - margin)))
-    # Resize the sunglare to the size of the image
-    sunglare = sunglare.resize((width, height), PILImage.LANCZOS)
+    sunglare = _random_overlay_transform(
+        sunglare,
+        width,
+        height,
+        crop_ratio=c,
+        rotation_choices=[0, 0, -8, 8],
+    )
     x.paste(sunglare, (0, 0), sunglare)
 
     return np.array(x)
@@ -610,9 +637,13 @@ def wildfire_smoke(x, severity=1):
     width, height = x.size
     root_path = _get_asset_root() + os.sep
     smoke = PILImage.open(root_path + 'corruption_filter' + os.sep + 'smoke.png').convert('RGBA')
-    # crop the bottom part of the sunglare
-    smoke = smoke.crop((0, smoke.size[1] * (1 - c), smoke.size[0], smoke.size[1]))
-    smoke = smoke.resize((width, height), PILImage.LANCZOS)
+    smoke = _random_overlay_transform(
+        smoke,
+        width,
+        height,
+        crop_ratio=c,
+        rotation_choices=[0, 0, -10, 10, 180],
+    )
     x.paste(smoke, (0, 0), smoke)
 
     return np.array(x)
@@ -623,13 +654,17 @@ def dust(x, severity=1):
          0.9,
          0.8,
          0.7][severity - 1]
-    # idx = np.random.randint(5)
     x = x.copy()
     width, height = x.size
     root_path = _get_asset_root() + os.sep
     dust = PILImage.open(root_path + 'corruption_filter' + os.sep + 'dust.png').convert('RGBA')
-    dust = dust.crop((0, 0, dust.size[0] * c, dust.size[1] * c))
-    dust = dust.resize((width, height), PILImage.LANCZOS)
+    dust = _random_overlay_transform(
+        dust,
+        width,
+        height,
+        crop_ratio=c,
+        rotation_choices=[0, 0, 0, -12, 12, 90, 180, 270],
+    )
     x.paste(dust, (0, 0), dust)
 
     return np.array(x)
@@ -647,8 +682,13 @@ def rain(x, severity=1):
     rain = PILImage.open(root_path + 'corruption_filter' + os.sep + 'rain.png').convert('RGBA')
     # enhance the rain
     rain = ImageEnhance.Brightness(rain).enhance(c)
-    # crop the bottom part of the sunglare
-    rain = rain.resize((width, height), PILImage.LANCZOS)
+    rain = _random_overlay_transform(
+        rain,
+        width,
+        height,
+        crop_ratio=np.random.uniform(0.85, 1.0),
+        rotation_choices=[0, 0, 0, -6, 6],
+    )
     x.paste(rain, (0, 0), rain)
 
     return np.array(x)
@@ -683,5 +723,3 @@ _INTENSITY_WRAPPED_FILTERS = [
 for _filter_name in _INTENSITY_WRAPPED_FILTERS:
     if _filter_name in globals():
         globals()[_filter_name] = _wrap_corruption_with_intensity(globals()[_filter_name])
-
-
