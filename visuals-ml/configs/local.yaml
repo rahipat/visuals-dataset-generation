@@ -1,0 +1,12 @@
+index_file: data/output/records.jsonl
+
+image_size: [960, 640]   # width x height (half of original 1920x1280)
+
+batch_size: 32
+num_workers: 6
+val_split: 0.2
+seed: 42
+
+lr: 1.0e-4
+epochs: 30
+checkpoint_dir: checkpoints/

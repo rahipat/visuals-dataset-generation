@@ -3,6 +3,8 @@ Image augmenter that wraps HiKER corruptions.
 Provides decode/encode utilities and ImageAugmenter class.
 """
 
+import random
+import numpy as np
 from io import BytesIO
 from typing import Dict, Optional
 from pathlib import Path
@@ -31,9 +33,12 @@ class ImageAugmenter:
     wildfire_smoke, dust, waterdrop.
     """
     
+    FIXED_SEED = 42
+
     def __init__(self, seed: Optional[int] = None):
-        self.seed = seed
-        self.rng = random.Random(seed)
+        self.seed = seed if seed is not None else self.FIXED_SEED
+        self.rng = random.Random(self.seed)
+        np.random.seed(self.seed)
         self.corruptions_mod = self._load_corruptions_module()
     
     def _load_corruptions_module(self):
@@ -84,14 +89,12 @@ class ImageAugmenter:
                     continue
                 intensity = self.rng.uniform(0.2, 0.8)
                 
-                # Call the corruption function
+                # Call the corruption function with randomized intensity
+                intensity = self.rng.uniform(0.55, 0.9)
                 try:
                     corrupted = fn(image, severity=severity, intensity=intensity)
                 except TypeError:
-                    try:
-                        corrupted = fn(image, severity=severity)
-                    except TypeError:
-                        corrupted = fn(image)
+                    corrupted = fn(image, severity=severity)
                 
                 # Ensure result is a PIL Image
                 if not isinstance(corrupted, PILImage.Image):

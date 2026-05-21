@@ -1,0 +1,12 @@
+index_file: data/output/records.jsonl
+
+image_size: [960, 640]
+
+batch_size: 16          # smaller for two-stream model on 8 GB VRAM
+num_workers: 4
+val_split: 0.2
+seed: 42
+
+lr: 1.0e-4
+epochs: 1               # one epoch is enough to confirm shapes / VRAM / loss decreases
+checkpoint_dir: checkpoints/

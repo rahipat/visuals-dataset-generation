@@ -214,6 +214,76 @@ def _wrap_corruption_with_intensity(fn):
 
     return wrapped
 
+def _clamp01(value):
+    return max(0.0, min(1.0, float(value)))
+
+
+def _intensity_to_severity(intensity):
+    return int(round(1.0 + 4.0 * _clamp01(intensity)))
+
+
+def _default_intensity_from_severity(severity):
+    sev = max(1, min(5, int(severity)))
+    return (sev - 1) / 4.0
+
+
+def _as_rgb_float255(arr):
+    out = np.asarray(arr, dtype=np.float32)
+    if out.ndim == 2:
+        out = np.stack([out, out, out], axis=-1)
+    if out.shape[-1] > 3:
+        out = out[..., :3]
+    if out.max() <= 1.5:
+        out = out * 255.0
+    return out
+
+
+def _blend_by_intensity(original_image, corrupted_image, intensity):
+    level = _clamp01(intensity)
+    if level >= 0.999:
+        return corrupted_image
+
+    orig = _as_rgb_float255(np.asarray(original_image))
+    corr = _as_rgb_float255(corrupted_image)
+    if corr.shape[:2] != orig.shape[:2]:
+        corr = cv2.resize(corr, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    mixed = orig * (1.0 - level) + corr * level
+    return np.clip(mixed, 0, 255)
+
+
+def _random_mirror_overlay(overlay):
+    """Randomly mirror an overlay (PIL Image or numpy array) in 0, 1, or both axes."""
+    flip_v = np.random.random() < 0.5
+    flip_h = np.random.random() < 0.5
+    if isinstance(overlay, PILImage.Image):
+        if flip_v:
+            overlay = ImageOps.flip(overlay)
+        if flip_h:
+            overlay = ImageOps.mirror(overlay)
+    else:
+        if flip_v:
+            overlay = np.flipud(overlay)
+        if flip_h:
+            overlay = np.fliplr(overlay)
+    return overlay
+
+
+def _wrap_corruption_with_intensity(fn):
+    @functools.wraps(fn)
+    def wrapped(x, *args, severity=1, intensity=None, **kwargs):
+        chosen_intensity = (
+            _default_intensity_from_severity(severity)
+            if intensity is None
+            else _clamp01(intensity)
+        )
+        mapped_severity = _intensity_to_severity(chosen_intensity)
+        corrupted = fn(x, *args, severity=mapped_severity, **kwargs)
+        return _blend_by_intensity(x, corrupted, chosen_intensity)
+
+    return wrapped
+
+
 def gaussian_noise(x, severity=1):
     c = [.08, .12, 0.18, 0.26, 0.38][severity - 1]
 
@@ -345,13 +415,11 @@ def frost(x, severity=1):
 
     width, height = x.size
     root_path = _get_asset_root() + os.sep
-    frost_dir = root_path + 'frost'
-    frost_candidates = sorted(
-        file_name for file_name in os.listdir(frost_dir)
-        if file_name.lower().endswith(('.png', '.jpg', '.jpeg'))
-    )
-    if not frost_candidates:
+    frost_files = ['frost1.png', 'frost2.png', 'frost3.png', 'frost4.jpg', 'frost5.jpg', 'frost6.jpg', 'frostlarge.jpg']
+    frost = cv2.imread(root_path + 'frost' + os.sep + np.random.choice(frost_files))
+    if frost is None:
         raise FileNotFoundError("frost texture not found")
+    frost = _random_mirror_overlay(frost)
 
     frost_name = frost_candidates[np.random.randint(len(frost_candidates))]
     frost = PILImage.open(frost_dir + os.sep + frost_name).convert('RGBA')
@@ -543,13 +611,12 @@ def sunglare(x, severity=1):
     width, height = x.size
     root_path = _get_asset_root() + os.sep
     sunglare = PILImage.open(root_path + 'corruption_filter' + os.sep + 'sunglare.png').convert('RGBA')
-    sunglare = _random_overlay_transform(
-        sunglare,
-        width,
-        height,
-        crop_ratio=c,
-        rotation_choices=[0, 0, -8, 8],
-    )
+    sunglare = _random_mirror_overlay(sunglare)
+    margin = (1 - c) / 2
+    # crop the middle part of the sunglare with ratio
+    sunglare = sunglare.crop((sunglare.size[0] * margin, sunglare.size[1] * margin, sunglare.size[0] * (1 - margin), sunglare.size[1] * (1 - margin)))
+    # Resize the sunglare to the size of the image
+    sunglare = sunglare.resize((width, height), PILImage.LANCZOS)
     x.paste(sunglare, (0, 0), sunglare)
 
     return np.array(x)
@@ -637,13 +704,10 @@ def wildfire_smoke(x, severity=1):
     width, height = x.size
     root_path = _get_asset_root() + os.sep
     smoke = PILImage.open(root_path + 'corruption_filter' + os.sep + 'smoke.png').convert('RGBA')
-    smoke = _random_overlay_transform(
-        smoke,
-        width,
-        height,
-        crop_ratio=c,
-        rotation_choices=[0, 0, -10, 10, 180],
-    )
+    smoke = _random_mirror_overlay(smoke)
+    # crop the bottom part of the sunglare
+    smoke = smoke.crop((0, smoke.size[1] * (1 - c), smoke.size[0], smoke.size[1]))
+    smoke = smoke.resize((width, height), PILImage.LANCZOS)
     x.paste(smoke, (0, 0), smoke)
 
     return np.array(x)
@@ -658,13 +722,9 @@ def dust(x, severity=1):
     width, height = x.size
     root_path = _get_asset_root() + os.sep
     dust = PILImage.open(root_path + 'corruption_filter' + os.sep + 'dust.png').convert('RGBA')
-    dust = _random_overlay_transform(
-        dust,
-        width,
-        height,
-        crop_ratio=c,
-        rotation_choices=[0, 0, 0, -12, 12, 90, 180, 270],
-    )
+    dust = _random_mirror_overlay(dust)
+    dust = dust.crop((0, 0, dust.size[0] * c, dust.size[1] * c))
+    dust = dust.resize((width, height), PILImage.LANCZOS)
     x.paste(dust, (0, 0), dust)
 
     return np.array(x)
@@ -680,6 +740,7 @@ def rain(x, severity=1):
     width, height = x.size
     root_path = _get_asset_root() + os.sep
     rain = PILImage.open(root_path + 'corruption_filter' + os.sep + 'rain.png').convert('RGBA')
+    rain = _random_mirror_overlay(rain)
     # enhance the rain
     rain = ImageEnhance.Brightness(rain).enhance(c)
     rain = _random_overlay_transform(
@@ -723,3 +784,6 @@ _INTENSITY_WRAPPED_FILTERS = [
 for _filter_name in _INTENSITY_WRAPPED_FILTERS:
     if _filter_name in globals():
         globals()[_filter_name] = _wrap_corruption_with_intensity(globals()[_filter_name])
+
+
+# /////////////// End Corruptions ///////////////

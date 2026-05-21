@@ -1,4 +1,6 @@
 # visuals-dataset-generation
+Outdated, TODO: update soon.
+
 
 Dataset generation pipeline for Waymo Open Dataset camera images with HiKER-SGG image alterations and compact metadata export.
 
@@ -6,13 +8,10 @@ Dataset generation pipeline for Waymo Open Dataset camera images with HiKER-SGG 
 
 Place the local mirrored dataset here:
 
-`dataset/waymo_open_dataset_v_2_0_1/<split>/<component>/*.parquet`
+`visuals-dataset-generation/dataset/`
 
-Example:
 
-`dataset/waymo_open_dataset_v_2_0_1/training/camera_image/*.parquet`
-
-The generator defaults to this local path. Use `-cloud` to read directly from GCS instead.
+The generator defaults to this local path. Use `-cloud` to read directly from GCS instead (requires Google Cloud credentials read from default path).
 
 ## Docker Requirement
 
@@ -35,25 +34,25 @@ python .\cache_waymo_subset.py --split training --max-camera-files 10 --output-r
 ### 2) Generate dataset from local cache (default mode)
 
 ```powershell
-python .\generate_dataset.py --split training --count 50 --max-files 10 --output-dir output --verbose
+python .\visuals-dataset\generate_dataset.py --split training --count 50 --max-files 10 --output-dir output --verbose
 ```
 
 ### 3) Generate dataset with Docker (recommended)
 
 ```powershell
-.\run_docker.ps1 --split training --count 50 --max-files 10 --output-dir output --verbose
+.\visuals-dataset\run_docker.ps1 --split training --count 50 --max-files 10 --output-dir output --verbose
 ```
 
 ### 4) Cloud mode (skip local cache)
 
 ```powershell
-.\run_docker.ps1 -cloud --split training --count 50 --max-files 10 --output-dir output --verbose
+.\visuals-dataset\run_docker.ps1 -cloud --split training --count 50 --max-files 10 --output-dir output --verbose
 ```
 
 ### 5) Optional scene re-association pass
 
 ```powershell
-python .\associate_lidar_scene.py --scene-metadata output\metadata\scene_metadata\<scene>.json --image-metadata-dir output\metadata\image_metadata --verbose
+python .\visuals-dataset\associate_lidar_scene.py --scene-metadata output\metadata\scene_metadata\<scene>.json --image-metadata-dir output\metadata\image_metadata --verbose
 ```
 
 ## Key Generator Arguments

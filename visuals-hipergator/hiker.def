@@ -1,0 +1,27 @@
+Bootstrap: docker
+From: tensorflow/tensorflow:2.11.0
+
+%files
+    requirements.txt /tmp/requirements.txt
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        imagemagick \
+        libmagickwand-dev \
+        xvfb \
+        libgl1-mesa-glx \
+        libx11-6 \
+        && rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir --upgrade pip setuptools wheel packaging
+    pip install --no-cache-dir -r /tmp/requirements.txt
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONUNBUFFERED=1
+
+%labels
+    Author visuals-dataset-generation
+    Purpose Waymo HiKER augmentation pipeline on HiPerGator

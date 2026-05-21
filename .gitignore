@@ -11,3 +11,6 @@ __pycache__/
 
 # OS/editor noise
 .DS_Store
+*.pyc
+HiKER-SGG_Alterations/__pycache__/corruptions.cpython-38.pyc
+.claude/settings.local.json

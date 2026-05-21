@@ -1,0 +1,15 @@
+# Waymo parquet loading / filtering
+pyarrow>=10.0.0
+pandas>=1.3.0
+
+# HiKER corruptions backend
+Wand>=0.6.7
+opencv-python>=4.5.0
+scikit-image>=0.18.0
+scipy>=1.7.0
+arcade>=2.6.0
+pyvirtualdisplay>=2.0
+
+# General imaging
+Pillow>=9.2.0
+numpy>=1.21.5

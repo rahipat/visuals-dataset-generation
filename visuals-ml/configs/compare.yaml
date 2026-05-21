@@ -1,0 +1,18 @@
+# A/B-comparison profile: two-stream architecture, 30 epochs.
+#
+# Matches local.yaml exactly (same epochs, same seed, same split, same lr,
+# same batch_size) so the only experimental variable is the architecture
+# (two-stream vs single-stream).
+
+index_file: data/output/records.jsonl
+
+image_size: [960, 640]
+
+batch_size: 32
+num_workers: 6
+val_split: 0.2
+seed: 42
+
+lr: 1.0e-4
+epochs: 30
+checkpoint_dir: checkpoints/two_stream_30ep
