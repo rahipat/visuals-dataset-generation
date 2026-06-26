@@ -196,9 +196,16 @@ so a re-running shard just overwrites its own files.
 
 - **Sharding** is round-robin over camera parquet files. Waymo v2 is one segment per file,
   so shards write disjoint `segment_*` directories.
-- **Waterdrop** augmentation requires OpenGL and will fail-and-skip on CPU compute nodes.
-  The augmenter logs a warning and continues with the other 9 corruptions. Re-run only
-  waterdrop on a GPU partition later if needed.
+- **Waterdrop is skipped by default.** It is the only corruption that needs OpenGL
+  (arcade/GPU + display), which doesn't work on headless CPU nodes. It is removed from
+  the corruption list in `visuals_dataset/augment.py`, and `corruptions.py` imports
+  arcade lazily — so the SIF needs **no** OpenGL/X11 libs and every CPU shard produces
+  the **clear + 8 corruptions** (rain, fog, snow, frost, sunglare, brightness,
+  wildfire_smoke, dust) reliably.
+  To enable waterdrop: uncomment it in `augment.py`, uncomment `arcade`/`pyvirtualdisplay`
+  in `requirements.txt`, add `xvfb libx11-6` back to `hiker.def`, rebuild the SIF, and run
+  on a **GPU partition** under `xvfb-run`. Because writes are deterministic per
+  `(segment, frame, camera)`, you can backfill just waterdrop later without touching the rest.
 
 ## Troubleshooting
 
