@@ -7,14 +7,11 @@ From: tensorflow/tensorflow:2.11.0
 %post
     export DEBIAN_FRONTEND=noninteractive
     # System libs for the augmentation backend:
-    #   imagemagick + libmagickwand-dev  -> Wand (fog/frost/snow/etc.)  [REQUIRED]
     #   libgl1-mesa-glx                  -> provides libGL.so.1 for opencv-python  [REQUIRED]
     # waterdrop (arcade/OpenGL) is skipped by default, so xvfb/libx11-6 are NOT
     # installed. To enable waterdrop on a GPU partition, add: xvfb libx11-6
     # (and arcade/pyvirtualdisplay in requirements.txt), then run under xvfb-run.
     apt-get update && apt-get install -y --no-install-recommends \
-        imagemagick \
-        libmagickwand-dev \
         libgl1-mesa-glx \
         && rm -rf /var/lib/apt/lists/*
 

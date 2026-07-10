@@ -78,9 +78,23 @@ def disk(radius, alias_blur=0.1, dtype=np.float32):
 
 
 def _motion_blur_cv2(pil_or_array, radius, sigma, angle):
+<<<<<<< Updated upstream
     """Pure-OpenCV motion blur replacing ImageMagick/wand. Returns BGR uint8 array."""
     if isinstance(pil_or_array, PILImage.Image):
         img = cv2.cvtColor(np.array(pil_or_array.convert('RGB')), cv2.COLOR_RGB2BGR)
+=======
+    """Pure-OpenCV motion blur replacing ImageMagick/wand.
+
+    Returns a BGR uint8 array for color input, or a single-channel 2D array
+    when the input is a grayscale (L-mode) PIL image, matching how the old
+    wand path decoded a grayscale PNG.
+    """
+    if isinstance(pil_or_array, PILImage.Image):
+        if pil_or_array.mode == 'L':
+            img = np.array(pil_or_array)
+        else:
+            img = cv2.cvtColor(np.array(pil_or_array.convert('RGB')), cv2.COLOR_RGB2BGR)
+>>>>>>> Stashed changes
     else:
         img = pil_or_array
     ksize = max(3, int(2 * radius + 1))
