@@ -18,8 +18,9 @@ import os
 import sys
 import math
 import functools
-import arcade
-from arcade.experimental import Shadertoy
+# VISUALS-MOD: arcade/OpenGL is imported lazily inside waterdrop()/toTexture() so this
+# module loads on headless nodes (no OpenGL/display). waterdrop is skipped by default
+# (see visuals_dataset/augment.py); install arcade + run on a GPU node to use it.
 
 # Initialize virtual display for headless rendering (Linux only)
 display = None
@@ -625,6 +626,8 @@ def sunglare(x, severity=1):
 #     return np.clip(c[0] * np.array(x) + c[1] * frost, 0, 255)
 
 def waterdrop(x, severity=1):
+    import arcade  # VISUALS-MOD: lazy import (OpenGL-only path)
+    from arcade.experimental import Shadertoy  # VISUALS-MOD: lazy import
     c = ["rain1.glsl",
         "rain2.glsl",
         "rain3.glsl",
@@ -666,6 +669,7 @@ def waterdrop(x, severity=1):
     return result[:, :, :3]
 
 def toTexture(img, ctx):
+    import arcade  # VISUALS-MOD: lazy import (OpenGL-only path)
     channels = img.shape[2]
     img_shape = img.shape[:2]
     img_shape = img_shape[::-1]

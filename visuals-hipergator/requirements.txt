@@ -6,8 +6,11 @@ pandas>=1.3.0
 opencv-python>=4.5.0
 scikit-image>=0.18.0
 scipy>=1.7.0
-arcade>=2.6.0
-pyvirtualdisplay>=2.0
+# arcade/pyvirtualdisplay are only needed for the `waterdrop` corruption (OpenGL),
+# which is skipped by default (see visuals_dataset/augment.py). Uncomment these and
+# the system libs in hiker.def to enable waterdrop on a GPU partition.
+# arcade>=2.6.0
+# pyvirtualdisplay>=2.0
 
 # General imaging
 Pillow>=9.2.0

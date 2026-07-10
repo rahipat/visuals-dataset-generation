@@ -30,7 +30,8 @@ class ImageAugmenter:
     """
     Image augmenter that delegates to HiKER-SGG_Alterations/corruptions.py.
     Applies: snow, frost, fog, rain, sunglare, brightness,
-    wildfire_smoke, dust, waterdrop.
+    wildfire_smoke, dust.
+    (waterdrop is skipped by default — it requires OpenGL/arcade; see below.)
     """
     
     FIXED_SEED = 42
@@ -78,7 +79,12 @@ class ImageAugmenter:
             ('brightness', 3),
             ('wildfire_smoke', 3),
             ('dust', 3),
-            ('waterdrop', 3),
+            # VISUALS-MOD: waterdrop skipped by default — it needs OpenGL/arcade
+            # (GPU + display) and fails on headless CPU nodes. corruptions.py imports
+            # arcade lazily, so leaving this out keeps the module OpenGL-free. To use
+            # it, install `arcade`/`pyvirtualdisplay`, run on a GPU partition under
+            # `xvfb-run`, and uncomment the line below.
+            # ('waterdrop', 3),
         ]
         
         for corruption_name, severity in corruptions_to_apply:

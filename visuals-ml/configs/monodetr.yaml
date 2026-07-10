@@ -1,0 +1,17 @@
+# MonoDETR baseline (milestone 3). Single vehicle class, Option A center-error eval.
+model: monodetr
+
+index_file: data/output/det_records.jsonl
+
+resolution: [960, 640]   # network input W x H (preserves Waymo 1.5 aspect)
+score_thresh: 0.2
+
+batch_size: 8
+num_workers: 4
+val_split: 0.2
+seed: 42
+
+lr: 2.0e-4
+clip_max_norm: 0.1      # MonoDETR's aleatoric depth loss needs gradient clipping
+epochs: 195
+checkpoint_dir: baselines/checkpoints/monodetr

@@ -1,0 +1,14 @@
+# PositionNet baseline under the harness (milestone 1).
+# Mirrors configs/local.yaml but adds the `model:` key the registry dispatches on.
+model: positionnet
+
+index_file: data/output/records.jsonl
+
+batch_size: 32
+num_workers: 6
+val_split: 0.2
+seed: 42
+
+lr: 1.0e-4
+epochs: 30
+checkpoint_dir: baselines/checkpoints/positionnet
