@@ -7,8 +7,6 @@ From: tensorflow/tensorflow:2.11.0
 %post
     export DEBIAN_FRONTEND=noninteractive
     apt-get update && apt-get install -y --no-install-recommends \
-        imagemagick \
-        libmagickwand-dev \
         xvfb \
         libgl1-mesa-glx \
         libx11-6 \

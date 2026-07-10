@@ -7,9 +7,6 @@ import numpy as np
 import skimage as sk
 from skimage.filters import gaussian
 from io import BytesIO
-from wand.image import Image as WandImage
-from wand.api import library as wandlibrary
-import wand.color as WandColor
 import ctypes
 from PIL import Image as PILImage
 from PIL import ImageEnhance, ImageOps
@@ -79,17 +76,21 @@ def disk(radius, alias_blur=0.1, dtype=np.float32):
     return cv2.GaussianBlur(aliased_disk, ksize=ksize, sigmaX=alias_blur)
 
 
-# Tell Python about the C method
-wandlibrary.MagickMotionBlurImage.argtypes = (ctypes.c_void_p,  # wand
-                                              ctypes.c_double,  # radius
-                                              ctypes.c_double,  # sigma
-                                              ctypes.c_double)  # angle
-
-
-# Extend wand.image.Image class to include method signature
-class MotionImage(WandImage):
-    def motion_blur(self, radius=0.0, sigma=0.0, angle=0.0):
-        wandlibrary.MagickMotionBlurImage(self.wand, radius, sigma, angle)
+def _motion_blur_cv2(pil_or_array, radius, sigma, angle):
+    """Pure-OpenCV motion blur replacing ImageMagick/wand. Returns BGR uint8 array."""
+    if isinstance(pil_or_array, PILImage.Image):
+        img = cv2.cvtColor(np.array(pil_or_array.convert('RGB')), cv2.COLOR_RGB2BGR)
+    else:
+        img = pil_or_array
+    ksize = max(3, int(2 * radius + 1))
+    kernel = np.zeros((ksize, ksize), dtype=np.float32)
+    kernel[ksize // 2, :] = 1.0
+    M = cv2.getRotationMatrix2D((ksize / 2 - 0.5, ksize / 2 - 0.5), angle, 1.0)
+    kernel = cv2.warpAffine(kernel, M, (ksize, ksize))
+    s = kernel.sum()
+    if s != 0:
+        kernel /= s
+    return cv2.filter2D(img, -1, kernel)
 
 
 # modification of https://github.com/FLHerne/mapgen/blob/master/diamondsquare.py
@@ -363,14 +364,7 @@ def motion_blur(x, severity=1):
     width, height = x.size
     c = [(10, 3), (15, 5), (15, 8), (15, 12), (20, 15)][severity - 1]
 
-    output = BytesIO()
-    x.save(output, format='PNG')
-    x = MotionImage(blob=output.getvalue())
-
-    x.motion_blur(radius=c[0], sigma=c[1], angle=np.random.uniform(-45, 45))
-
-    x = cv2.imdecode(np.fromstring(x.make_blob(), np.uint8),
-                     cv2.IMREAD_UNCHANGED)
+    x = _motion_blur_cv2(x, radius=c[0], sigma=c[1], angle=np.random.uniform(-45, 45))
 
     if x.shape != (height, width):
         return np.clip(x[..., [2, 1, 0]], 0, 255)  # BGR to RGB
@@ -453,14 +447,7 @@ def snow(x, severity=1):
     snow_layer[snow_layer < c[3]] = 0
 
     snow_layer = PILImage.fromarray((np.clip(snow_layer.squeeze(), 0, 1) * 255).astype(np.uint8), mode='L')
-    output = BytesIO()
-    snow_layer.save(output, format='PNG')
-    snow_layer = MotionImage(blob=output.getvalue())
-
-    snow_layer.motion_blur(radius=c[4], sigma=c[5], angle=np.random.uniform(-135, -45))
-
-    snow_layer = cv2.imdecode(np.fromstring(snow_layer.make_blob(), np.uint8),
-                              cv2.IMREAD_UNCHANGED) / 255.
+    snow_layer = _motion_blur_cv2(snow_layer, radius=c[4], sigma=c[5], angle=np.random.uniform(-135, -45)) / 255.
     snow_layer = snow_layer[..., np.newaxis]
 
     x = c[6] * x + (1 - c[6]) * np.maximum(x, cv2.cvtColor(x, cv2.COLOR_RGB2GRAY).reshape(height, width, 1) * 1.5 + 0.5)
