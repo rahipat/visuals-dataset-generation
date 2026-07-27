@@ -58,17 +58,29 @@ def disk(radius, alias_blur=0.1, dtype=np.float32):
     return cv2.GaussianBlur(aliased_disk, ksize=ksize, sigmaX=alias_blur)
 
 
-# Tell Python about the C method
-wandlibrary.MagickMotionBlurImage.argtypes = (ctypes.c_void_p,  # wand
-                                              ctypes.c_double,  # radius
-                                              ctypes.c_double,  # sigma
-                                              ctypes.c_double)  # angle
+def _motion_blur_cv2(pil_or_array, radius, sigma, angle):
+    """Pure-OpenCV motion blur replacing ImageMagick/wand.
 
-
-# Extend wand.image.Image class to include method signature
-class MotionImage(WandImage):
-    def motion_blur(self, radius=0.0, sigma=0.0, angle=0.0):
-        wandlibrary.MagickMotionBlurImage(self.wand, radius, sigma, angle)
+    Returns a BGR uint8 array for color input, or a single-channel 2D array
+    when the input is a grayscale (L-mode) PIL image, matching how the old
+    wand path decoded a grayscale PNG.
+    """
+    if isinstance(pil_or_array, PILImage.Image):
+        if pil_or_array.mode == 'L':
+            img = np.array(pil_or_array)
+        else:
+            img = cv2.cvtColor(np.array(pil_or_array.convert('RGB')), cv2.COLOR_RGB2BGR)
+    else:
+        img = pil_or_array
+    ksize = max(3, int(2 * radius + 1))
+    kernel = np.zeros((ksize, ksize), dtype=np.float32)
+    kernel[ksize // 2, :] = 1.0
+    M = cv2.getRotationMatrix2D((ksize / 2 - 0.5, ksize / 2 - 0.5), angle, 1.0)
+    kernel = cv2.warpAffine(kernel, M, (ksize, ksize))
+    s = kernel.sum()
+    if s != 0:
+        kernel /= s
+    return cv2.filter2D(img, -1, kernel)
 
 
 # modification of https://github.com/FLHerne/mapgen/blob/master/diamondsquare.py
