@@ -1,0 +1,7 @@
+# Extra Python deps for the baselines training container (on top of the
+# pytorch/pytorch base image, which already provides torch + torchvision).
+opencv-contrib-python>=4.8   # TV-L1 optical flow (cv2.optflow) for the temporal stream
+scikit-learn>=1.3            # LinearSVR for the introspection SVM stage
+pyyaml>=6.0                  # config loading
+pillow>=9.0                  # image IO
+numpy>=1.24

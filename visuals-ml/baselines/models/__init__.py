@@ -2,3 +2,4 @@
 
 from baselines.models import position_net  # noqa: F401
 from baselines.models import monodetr  # noqa: F401
+from baselines.models import introspection  # noqa: F401
