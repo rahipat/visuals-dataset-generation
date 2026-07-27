@@ -7,9 +7,6 @@ import numpy as np
 import skimage as sk
 from skimage.filters import gaussian
 from io import BytesIO
-from wand.image import Image as WandImage
-from wand.api import library as wandlibrary
-import wand.color as WandColor
 import ctypes
 from PIL import Image as PILImage
 from PIL import ImageEnhance, ImageOps
@@ -43,6 +40,28 @@ def _get_asset_root():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _random_overlay_transform(overlay, width, height, crop_ratio=1.0, rotation_choices=None):
+    """Sample a shifted crop and optional rotation to avoid fixed overlay patterns."""
+    overlay = overlay.copy()
+
+    if rotation_choices:
+        rotation = rotation_choices[np.random.randint(len(rotation_choices))]
+        if rotation:
+            overlay = overlay.rotate(rotation, resample=PILImage.BICUBIC, expand=True)
+
+    crop_ratio = max(float(crop_ratio), 1e-3)
+    crop_width = min(overlay.size[0], max(1, int(round(overlay.size[0] * crop_ratio))))
+    crop_height = min(overlay.size[1], max(1, int(round(overlay.size[1] * crop_ratio))))
+
+    max_left = max(overlay.size[0] - crop_width, 0)
+    max_top = max(overlay.size[1] - crop_height, 0)
+    left = np.random.randint(0, max_left + 1) if max_left else 0
+    top = np.random.randint(0, max_top + 1) if max_top else 0
+
+    overlay = overlay.crop((left, top, left + crop_width, top + crop_height))
+    return overlay.resize((width, height), PILImage.LANCZOS)
+
+
 def disk(radius, alias_blur=0.1, dtype=np.float32):
     if radius <= 8:
         L = np.arange(-8, 8 + 1)
@@ -58,17 +77,35 @@ def disk(radius, alias_blur=0.1, dtype=np.float32):
     return cv2.GaussianBlur(aliased_disk, ksize=ksize, sigmaX=alias_blur)
 
 
-# Tell Python about the C method
-wandlibrary.MagickMotionBlurImage.argtypes = (ctypes.c_void_p,  # wand
-                                              ctypes.c_double,  # radius
-                                              ctypes.c_double,  # sigma
-                                              ctypes.c_double)  # angle
+def _motion_blur_cv2(pil_or_array, radius, sigma, angle):
+<<<<<<< Updated upstream
+    """Pure-OpenCV motion blur replacing ImageMagick/wand. Returns BGR uint8 array."""
+    if isinstance(pil_or_array, PILImage.Image):
+        img = cv2.cvtColor(np.array(pil_or_array.convert('RGB')), cv2.COLOR_RGB2BGR)
+=======
+    """Pure-OpenCV motion blur replacing ImageMagick/wand.
 
-
-# Extend wand.image.Image class to include method signature
-class MotionImage(WandImage):
-    def motion_blur(self, radius=0.0, sigma=0.0, angle=0.0):
-        wandlibrary.MagickMotionBlurImage(self.wand, radius, sigma, angle)
+    Returns a BGR uint8 array for color input, or a single-channel 2D array
+    when the input is a grayscale (L-mode) PIL image, matching how the old
+    wand path decoded a grayscale PNG.
+    """
+    if isinstance(pil_or_array, PILImage.Image):
+        if pil_or_array.mode == 'L':
+            img = np.array(pil_or_array)
+        else:
+            img = cv2.cvtColor(np.array(pil_or_array.convert('RGB')), cv2.COLOR_RGB2BGR)
+>>>>>>> Stashed changes
+    else:
+        img = pil_or_array
+    ksize = max(3, int(2 * radius + 1))
+    kernel = np.zeros((ksize, ksize), dtype=np.float32)
+    kernel[ksize // 2, :] = 1.0
+    M = cv2.getRotationMatrix2D((ksize / 2 - 0.5, ksize / 2 - 0.5), angle, 1.0)
+    kernel = cv2.warpAffine(kernel, M, (ksize, ksize))
+    s = kernel.sum()
+    if s != 0:
+        kernel /= s
+    return cv2.filter2D(img, -1, kernel)
 
 
 # modification of https://github.com/FLHerne/mapgen/blob/master/diamondsquare.py
@@ -140,10 +177,58 @@ def clipped_zoom(img, zoom_factor):
     return img[trim_top:trim_top + h, trim_left:trim_left + w]
 
 
-# /////////////// End Corruption Helpers ///////////////
+def _clamp01(value):
+    return max(0.0, min(1.0, float(value)))
 
 
-# /////////////// Corruptions ///////////////
+def _intensity_to_severity(intensity):
+    # Map [0, 1] to integer severity levels [1, 5].
+    return int(round(1.0 + 4.0 * _clamp01(intensity)))
+
+
+def _default_intensity_from_severity(severity):
+    sev = max(1, min(5, int(severity)))
+    return (sev - 1) / 4.0
+
+
+def _as_rgb_float255(arr):
+    out = np.asarray(arr, dtype=np.float32)
+    if out.ndim == 2:
+        out = np.stack([out, out, out], axis=-1)
+    if out.shape[-1] > 3:
+        out = out[..., :3]
+    if out.max() <= 1.5:
+        out = out * 255.0
+    return out
+
+
+def _blend_by_intensity(original_image, corrupted_image, intensity):
+    level = _clamp01(intensity)
+    if level >= 0.999:
+        return corrupted_image
+
+    orig = _as_rgb_float255(np.asarray(original_image))
+    corr = _as_rgb_float255(corrupted_image)
+    if corr.shape[:2] != orig.shape[:2]:
+        corr = cv2.resize(corr, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    mixed = orig * (1.0 - level) + corr * level
+    return np.clip(mixed, 0, 255)
+
+
+def _wrap_corruption_with_intensity(fn):
+    @functools.wraps(fn)
+    def wrapped(x, *args, severity=1, intensity=None, **kwargs):
+        chosen_intensity = (
+            _default_intensity_from_severity(severity)
+            if intensity is None
+            else _clamp01(intensity)
+        )
+        mapped_severity = _intensity_to_severity(chosen_intensity)
+        corrupted = fn(x, *args, severity=mapped_severity, **kwargs)
+        return _blend_by_intensity(x, corrupted, chosen_intensity)
+
+    return wrapped
 
 def _clamp01(value):
     return max(0.0, min(1.0, float(value)))
@@ -244,15 +329,10 @@ def speckle_noise(x, severity=1):
 
 
 def fgsm(x, source_net, severity=1):
-    c = [8, 16, 32, 64, 128][severity - 1]
-
-    x = V(x, requires_grad=True)
-    logits = source_net(x)
-    source_net.zero_grad()
-    loss = F.cross_entropy(logits, V(logits.data.max(1)[1].squeeze_()), size_average=False)
-    loss.backward()
-
-    return standardize(torch.clamp(unstandardize(x.data) + c / 255. * unstandardize(torch.sign(x.grad.data)), 0, 1))
+    raise NotImplementedError(
+        "fgsm is not supported in this runtime. It depends on torch and "
+        "project-specific helpers (V, F, standardize, unstandardize) that are not defined here."
+    )
 
 
 def gaussian_blur(x, severity=1):
@@ -299,14 +379,7 @@ def motion_blur(x, severity=1):
     width, height = x.size
     c = [(10, 3), (15, 5), (15, 8), (15, 12), (20, 15)][severity - 1]
 
-    output = BytesIO()
-    x.save(output, format='PNG')
-    x = MotionImage(blob=output.getvalue())
-
-    x.motion_blur(radius=c[0], sigma=c[1], angle=np.random.uniform(-45, 45))
-
-    x = cv2.imdecode(np.fromstring(x.make_blob(), np.uint8),
-                     cv2.IMREAD_UNCHANGED)
+    x = _motion_blur_cv2(x, radius=c[0], sigma=c[1], angle=np.random.uniform(-45, 45))
 
     if x.shape != (height, width):
         return np.clip(x[..., [2, 1, 0]], 0, 255)  # BGR to RGB
@@ -348,7 +421,6 @@ def frost(x, severity=1):
          (0.7, 0.7),
          (0.65, 0.7),
          (0.6, 0.75)][severity - 1]
-    # idx = np.random.randint(5)
 
     width, height = x.size
     root_path = _get_asset_root() + os.sep
@@ -358,18 +430,18 @@ def frost(x, severity=1):
         raise FileNotFoundError("frost texture not found")
     frost = _random_mirror_overlay(frost)
 
-    frost_h, frost_w = frost.shape[:2]
-    if frost_h >= height and frost_w >= width:
-        # Crop a random window when the texture is big enough.
-        top = np.random.randint(0, frost_h - height + 1) if frost_h > height else 0
-        left = np.random.randint(0, frost_w - width + 1) if frost_w > width else 0
-        frost = frost[top:top + height, left:left + width]
-    else:
-        # Upscale smaller textures to avoid shape mismatch on high-res frames.
-        frost = cv2.resize(frost, (width, height), interpolation=cv2.INTER_CUBIC)
+    frost_name = frost_candidates[np.random.randint(len(frost_candidates))]
+    frost = PILImage.open(frost_dir + os.sep + frost_name).convert('RGBA')
+    frost = _random_overlay_transform(
+        frost,
+        width,
+        height,
+        crop_ratio=np.random.uniform(0.75, 1.0),
+        rotation_choices=[0, 0, 0, 90, 180, 270, -15, 15],
+    )
 
-    # Convert BGR -> RGB and blend. Keep frost overlay at 50% of original strength.
-    frost = frost[..., [2, 1, 0]].astype(np.float32)
+    # Blend the transformed frost texture into the RGB frame.
+    frost = np.array(frost.convert('RGB'), dtype=np.float32)
     x_arr = np.array(x, dtype=np.float32)
     frost_weight = 0.5 * c[1]
     return np.clip(c[0] * x_arr + frost_weight * frost, 0, 255)
@@ -390,14 +462,7 @@ def snow(x, severity=1):
     snow_layer[snow_layer < c[3]] = 0
 
     snow_layer = PILImage.fromarray((np.clip(snow_layer.squeeze(), 0, 1) * 255).astype(np.uint8), mode='L')
-    output = BytesIO()
-    snow_layer.save(output, format='PNG')
-    snow_layer = MotionImage(blob=output.getvalue())
-
-    snow_layer.motion_blur(radius=c[4], sigma=c[5], angle=np.random.uniform(-135, -45))
-
-    snow_layer = cv2.imdecode(np.fromstring(snow_layer.make_blob(), np.uint8),
-                              cv2.IMREAD_UNCHANGED) / 255.
+    snow_layer = _motion_blur_cv2(snow_layer, radius=c[4], sigma=c[5], angle=np.random.uniform(-135, -45)) / 255.
     snow_layer = snow_layer[..., np.newaxis]
 
     x = c[6] * x + (1 - c[6]) * np.maximum(x, cv2.cvtColor(x, cv2.COLOR_RGB2GRAY).reshape(height, width, 1) * 1.5 + 0.5)
@@ -658,7 +723,6 @@ def dust(x, severity=1):
          0.9,
          0.8,
          0.7][severity - 1]
-    # idx = np.random.randint(5)
     x = x.copy()
     width, height = x.size
     root_path = _get_asset_root() + os.sep
@@ -684,8 +748,13 @@ def rain(x, severity=1):
     rain = _random_mirror_overlay(rain)
     # enhance the rain
     rain = ImageEnhance.Brightness(rain).enhance(c)
-    # crop the bottom part of the sunglare
-    rain = rain.resize((width, height), PILImage.LANCZOS)
+    rain = _random_overlay_transform(
+        rain,
+        width,
+        height,
+        crop_ratio=np.random.uniform(0.85, 1.0),
+        rotation_choices=[0, 0, 0, -6, 6],
+    )
     x.paste(rain, (0, 0), rain)
 
     return np.array(x)
