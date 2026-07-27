@@ -9,6 +9,7 @@ from io import BytesIO
 from typing import Dict, Optional
 from pathlib import Path
 import importlib.util
+import random
 
 from PIL import Image as PILImage
 
@@ -92,6 +93,7 @@ class ImageAugmenter:
                 if fn is None:
                     print(f"[warn] Corruption '{corruption_name}' not found in HiKER module")
                     continue
+                intensity = self.rng.uniform(0.2, 0.8)
                 
                 # Call the corruption function with randomized intensity
                 intensity = self.rng.uniform(0.55, 0.9)
