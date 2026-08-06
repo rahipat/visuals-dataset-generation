@@ -5,6 +5,22 @@
 /visuals_dataset/output/
 /visuals_dataset/output_schema_check/
 
+# Model weights. Big, binary, and regenerable — they belong on /blue or in a
+# release, not in git history.
+*.pt
+*.pth
+*.sif
+/visuals-ml/checkpoints/
+/visuals-ml/baselines/checkpoints/
+
+# Generated indexes. Rebuilt by baselines/data/build_*_index.py, and they store
+# ABSOLUTE image paths, so an index committed from one machine is wrong on every
+# other one. Rebuild in place instead (hipergator/prepare_indexes.sbatch).
+/visuals-ml/data/output/
+
+# Smoke-test / evaluation reports
+/visuals-ml/reports/
+
 # Python cache/build artifacts
 __pycache__/
 *.py[cod]

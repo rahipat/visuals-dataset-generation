@@ -1,0 +1,68 @@
+# Deploy smoke test — subset run of all three perception baselines.
+#
+#   python -m baselines.smoke_deploy --config baselines/configs/smoke_deploy.yaml
+#
+# Nothing here trains to convergence. The point is to prove the deploy works and
+# the wiring is sound, then hand back a JSON verdict that decides whether the
+# full jobs are worth scheduling. Keep the subset small — target ~15 min total.
+
+report: smoke_report.json
+
+# Batches of data per model, and how many times to re-fit them for the overfit
+# check. 3 x 12 is enough to separate "learning" from "broken" without training.
+batches: 3
+overfit_iters: 12
+
+gates:
+  overfit_loss_ratio: 0.6   # loss must fall to <=60% of its start
+  min_segments: 2
+  min_images_checked: 5
+  min_throughput: 0.5       # samples/sec
+
+common:
+  num_workers: 0            # deterministic; isolates model faults from dataloader ones
+  val_split: 0.2
+  seed: 42
+  group_by: segment
+
+models:
+  # B — amodal 3D box regression. Cheapest, and the substrate introspection
+  # needs, so it is the one that most needs to pass.
+  box3d:
+    index_file: data/output/det_records.jsonl
+    batch_size: 8
+    lr: 5.0e-4
+    train_weathers: [clear]
+    drop_truncated: true
+    depth_prior: 25.0
+    w_center: 1.0
+    w_depth: 2.0
+    w_dim: 1.0
+    w_angle: 1.0
+    # For the wall-clock estimate only: objects/epoch in the planned full run.
+    full_run_samples: 115000
+    full_run_epochs: 30
+
+  # A — MonoDETR. Shares B's index. Heaviest model; also the one whose CUDA
+  # deformable-attention op is most likely to fail on a new container.
+  monodetr:
+    index_file: data/output/det_records.jsonl
+    batch_size: 2
+    lr: 2.0e-4
+    clip_max_norm: 0.1
+    resolution: [960, 640]
+    score_thresh: 0.2
+    train_weathers: [clear]
+    full_run_samples: 32000
+    full_run_epochs: 60
+
+  # C — velocity. NOTE: its labels are the Waymo speed field, which is ~72%
+  # near-zero on the local sample. Read `skill_vs_zero` in the report: if it is
+  # <= 0 the task as labelled is degenerate and needs the track-difference fix
+  # before a full run is worth any GPU time.
+  velocity:
+    index_file: data/output/velocity_records.jsonl
+    batch_size: 8
+    lr: 1.0e-4
+    full_run_samples: 60000
+    full_run_epochs: 30

@@ -118,8 +118,16 @@ class CenterErrorMetric:
             total.n_matched += acc.n_matched
             total.n_gt += acc.n_gt
         overall = self._summarize(total)
-        # monitor: depth error among matched, penalized by misses (lower is better)
-        recall = overall["recall"] or 1e-6
-        overall["monitor"] = overall["depth_mae"] / recall
+        # monitor: depth error among matched, penalized by misses (lower is better).
+        #
+        # A detector that predicts NOTHING has n_matched == 0, hence depth_mae == 0
+        # (an empty mean) and recall == 0. Dividing those gives monitor == 0.0 --
+        # the best possible score -- so the runner would checkpoint the degenerate
+        # model and never improve on it. An empty prediction set is the worst
+        # outcome, not the best, so it must map to +inf.
+        if overall["n_matched"] == 0:
+            overall["monitor"] = float("inf")
+        else:
+            overall["monitor"] = overall["depth_mae"] / overall["recall"]
         overall["per_weather"] = per_weather
         return overall
