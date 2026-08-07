@@ -19,7 +19,7 @@ import torch
 from baselines.core.interface import BaselineModel
 from baselines.core.metrics import CenterErrorMetric, Sample
 from baselines.core.registry import register_model
-from baselines.core.utils import split_dataset
+from baselines.core.utils import split_by_group
 from baselines.data._vendor_path import ensure_vendor_on_path
 from baselines.data.detection_dataset import (
     DetectionDataset, MAX_OBJS, compute_mean_size, load_records,
@@ -67,9 +67,29 @@ class MonoDETRBaseline(BaselineModel):
     def build_datasets(self, cfg: dict):
         records = load_records(cfg["index_file"])
         print(f"Detection records: {len(records)} images")
+        train_weathers = cfg.get("train_weathers")
+        if train_weathers:
+            keep = set(train_weathers)
+            records = [r for r in records if r.get("weather") in keep]
+            print(f"Filtered to weathers {sorted(keep)}: {len(records)} records")
+
         mean = compute_mean_size(records)
         self.mean_size.copy_(torch.from_numpy(mean))
-        train_recs, val_recs = split_dataset(records, cfg["val_split"], cfg["seed"])
+
+        # Split on segments, not records: every frame is re-rendered under 10
+        # weathers and frames arrive at ~10 Hz, so a record split puts the same
+        # scene on both sides and validation becomes fiction. Matches box3d.
+        group_by = cfg.get("group_by", "segment")
+        groups = [
+            r["segment"] if group_by == "segment"
+            else f"{r['segment']}|{r.get('camera')}|{r.get('stem')}"
+            for r in records
+        ]
+        if group_by != "segment":
+            print(f"WARNING: group_by={group_by!r} — validation is optimistic.")
+        train_recs, val_recs = split_by_group(
+            records, groups, cfg["val_split"], cfg["seed"]
+        )
         train_recs = [records[i] for i in train_recs.indices]
         val_recs = [records[i] for i in val_recs.indices]
         make = lambda recs: DetectionDataset(recs, self.resolution, mean)

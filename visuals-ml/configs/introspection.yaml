@@ -1,0 +1,25 @@
+# Introspective Perception baseline (Paper 1, Daftry et al. 2016).
+# Two-stream CNN trained with softmax by `baselines.train`; the linear-SVM stage
+# (`baselines.introspection_svm`) produces the paper's Error-vs-Failure-Rate curve.
+model: introspection
+
+# Labeled index from introspection_label_prepass.py (which needs a trained
+# PositionNet checkpoint). Build order:
+#   python -m baselines.data.build_introspection_index --cameras 1 --flow-stack 5
+#   python -m baselines.data.introspection_label_prepass \
+#       --checkpoint baselines/checkpoints/positionnet/best.pt
+index_file: data/output/introspection_labeled.jsonl
+
+resolution: 224          # AlexNet input (S x S); paper uses 227
+flow_stack: 5            # optical-flow fields (=> 2*flow_stack temporal channels)
+feat_dim: 512            # fc8 shared-feature dimension
+flow_cache: data/output/flow_cache   # .npy TV-L1 cache; pre-warm once on HiPerGator
+
+batch_size: 32
+num_workers: 4           # set 0 on Windows if dataloader issues
+val_split: 0.2
+seed: 42
+
+lr: 1.0e-4
+epochs: 30
+checkpoint_dir: baselines/checkpoints/introspection

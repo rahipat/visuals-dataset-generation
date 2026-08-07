@@ -1,0 +1,43 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
+
+# Singularity image for training the visuals-ml baselines on HiPerGator GPUs.
+# Separate from visuals-hipergator/hiker.def (that one is the TensorFlow +
+# ImageMagick *dataset-generation* image; this one is PyTorch + CUDA for *ML*).
+#
+# Build (on a machine with singularity + sudo/fakeroot):
+#   singularity build train.sif train.def
+
+%files
+    requirements-ml.txt /tmp/requirements-ml.txt
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    # libGL + glib for opencv-python at runtime.
+    apt-get update && apt-get install -y --no-install-recommends \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir --upgrade pip
+    pip install --no-cache-dir -r /tmp/requirements-ml.txt
+
+    # Bake pretrained weights INTO the image. HiPerGator compute nodes usually
+    # have no internet, so the runtime alexnet(weights=DEFAULT) download would
+    # fail. Cache it here (build host has internet) at a fixed in-image path that
+    # won't be shadowed by the host $HOME bind mount at runtime.
+    export TORCH_HOME=/opt/torch-cache
+    mkdir -p /opt/torch-cache
+    python -c "import torchvision; torchvision.models.alexnet(weights='DEFAULT')"
+    chmod -R a+rX /opt/torch-cache
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONUNBUFFERED=1
+    # Point torch at the baked weight cache (see %post).
+    export TORCH_HOME=/opt/torch-cache
+
+%labels
+    Author visuals-dataset-generation
+    Purpose PyTorch/CUDA training for visuals-ml baselines (introspection, etc.)

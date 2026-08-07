@@ -1,0 +1,43 @@
+# Baseline B — amodal 3D box regression (centre + dimensions + yaw) from a
+# given 2D box. Shares MonoDETR's per-image index, so B and A are scored against
+# identical labels.
+#
+#   python -m baselines.data.build_detection_index --cameras 1 --frame-stride 5
+#   python -m baselines.train --config configs/box3d.yaml
+#   python -m baselines.eval  --config configs/box3d.yaml
+model: box3d
+
+index_file: data/output/det_records.jsonl
+
+batch_size: 32
+num_workers: 6
+val_split: 0.2
+seed: 42
+
+# Train on clear only; evaluate on all 10. The variants are pixel-wise different
+# but geometrically identical, so training on all of them multiplies compute
+# without adding geometric information — and weather is the TEST axis here, not
+# a source of augmentation. Set to null to train on every weather in the index.
+train_weathers: [clear]
+
+# Quality filters. min_pts > 0 drops boxes with no LiDAR returns (fully occluded
+# or interpolated), whose 3D labels are not trustworthy. Default 0 = keep all.
+min_box_px: 0
+min_pts: 0
+# Drop objects whose 2D box is clipped by the frame border. Their box centre no
+# longer matches the projected 3D centre (measured: ~86% of whole objects have
+# the projected centre inside the box vs ~48-61% of truncated ones), so they
+# teach a corrupted mapping. Set false only to measure the effect.
+drop_truncated: true
+
+# Loss weights over the encoded target. Depth is the hard part of monocular 3D,
+# so it gets 2x rather than being averaged away against 5 easier parameters.
+huber_beta: 0.1
+w_center: 1.0
+w_depth: 2.0
+w_dim: 1.0
+w_angle: 1.0
+
+lr: 1.0e-4
+epochs: 30
+checkpoint_dir: baselines/checkpoints/box3d

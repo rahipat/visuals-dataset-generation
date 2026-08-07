@@ -16,7 +16,7 @@ torch._dynamo.config.suppress_errors = True
 import baselines.models  # noqa: F401  (registers all baselines)
 from baselines.core.registry import build_model
 from baselines.core.runner import evaluate
-from baselines.core.utils import load_config
+from baselines.core.utils import apply_index_suffix, load_config
 
 
 def main():
@@ -24,9 +24,16 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", default=None,
                         help="Defaults to <checkpoint_dir>/best.pt")
+    parser.add_argument("--index-suffix", default=None,
+                        help="Insert '_<suffix>' before .jsonl in index_file. "
+                             "Use the all-weather index here: weather is the "
+                             "test axis, so evaluation must span every variant.")
+    parser.add_argument("--report", default=None,
+                        help="Write the full metrics dict to this JSON path.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    cfg = apply_index_suffix(cfg, args.index_suffix)
     checkpoint = args.checkpoint or f"{cfg['checkpoint_dir']}/best.pt"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,6 +41,17 @@ def main():
 
     model = build_model(cfg)
     metrics = evaluate(model, cfg, device, checkpoint)
+
+    if args.report:
+        from pathlib import Path
+        out = Path(args.report)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump({"model": cfg["model"], "config": args.config,
+                       "checkpoint": checkpoint,
+                       "index_file": cfg.get("index_file"),
+                       "metrics": metrics}, f, indent=2, default=str)
+        print(f"Wrote report to {out}")
 
     per_weather = metrics.pop("per_weather", None)
     print("\n=== Overall ===")
