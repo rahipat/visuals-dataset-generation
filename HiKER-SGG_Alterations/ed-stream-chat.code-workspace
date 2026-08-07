@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "../../../ed-stream-chat"
+		},
+		{
+			"path": "../../../ed-stream-api"
+		}
+	],
+	"settings": {}
+}
