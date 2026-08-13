@@ -75,10 +75,14 @@ pretraining, unavailable); AlexNet input is 224 not 227; TV-L1 flow requires
    `positionnet` baseline:
    ```bash
    # inside the container, from visuals-ml/
-   python -m baselines.data.build_index --source-dir <DATASET_OUTPUT>
+   python -m data.build_index --source-dir <DATASET_OUTPUT>
    python -m baselines.train --config configs/positionnet.yaml
    # -> baselines/checkpoints/positionnet/best.pt
    ```
+   Note the module path: the PositionNet index builder is `data.build_index`
+   (top-level `data/`), *not* `baselines.data.build_index` — the latter does not
+   exist. On HiPerGator you can run both steps as a job with
+   `sbatch train_positionnet.sbatch`.
    The label pre-pass accepts either a harness checkpoint (keys under `core.`) or
    a bare PositionNet state dict.
 3. **The training Singularity image** (`train.sif`) — build once (step 2).
@@ -104,23 +108,37 @@ singularity build --fakeroot train.sif train.def
 
 ## 3. Configure and submit
 
-Edit the paths block at the top of `train_introspection.sbatch`:
+The sbatch scripts read their paths from the environment. `GROUP` and `HPG_USER`
+are required — leave either unset and the job aborts immediately with
+`GROUP: set me - your HiPerGator group ...` rather than a confusing error:
 
 ```bash
-REPO_ROOT=/blue/<GROUP>/<USER>/visuals-dataset-generation
-DATASET_OUTPUT=/blue/<GROUP>/<USER>/waymo/output   # the visuals output tree
-SIF=/blue/<GROUP>/<USER>/waymo/train.sif
-POSITIONNET_CKPT=baselines/checkpoints/positionnet/best.pt  # relative to visuals-ml/
-CONFIG=configs/introspection.yaml
-CAMERAS=1
+export GROUP=<your-group>
+export HPG_USER=$USER          # named HPG_USER because the shell always sets USER
 ```
-Also set `--account` / `--qos` (and `--partition`, if your GPU partition differs).
 
-Submit:
+Everything else has a default derived from those two, and can be overridden the
+same way if your layout differs:
+
+| Variable | Default |
+|---|---|
+| `REPO_ROOT` | `/blue/$GROUP/$HPG_USER/visuals-dataset-generation` |
+| `DATASET_OUTPUT` | `/blue/$GROUP/$HPG_USER/waymo/output` (the visuals output tree) |
+| `SIF` | `/blue/$GROUP/$HPG_USER/waymo/train.sif` |
+| `POSITIONNET_CKPT` | `baselines/checkpoints/positionnet/best.pt` (relative to `visuals-ml/`) |
+| `CONFIG` | `configs/introspection.yaml` |
+| `CAMERAS` | `1` |
+
+Submit (`sbatch` forwards your environment to the job by default):
 ```bash
-cd /blue/<GROUP>/<USER>/visuals-dataset-generation/visuals-ml/hipergator
-sbatch train_introspection.sbatch
+cd "$REPO_ROOT"/visuals-ml/hipergator
+sbatch --account=$GROUP --qos=$GROUP train_introspection.sbatch
 ```
+
+The `--account` / `--qos` flags go on the command line because `#SBATCH` lines are
+parsed by SLURM before the shell runs and get no variable expansion; the in-file
+`<GROUP>` placeholders on those two directives are the alternative to edit by hand.
+Set `--partition` too if your GPU partition differs.
 
 The job runs the whole chain inside the container: build index + labels (skipped
 if `data/output/introspection_labeled.jsonl` already exists) → train the CNN → fit
@@ -250,8 +268,11 @@ visuals-ml/
   configs/
     introspection.yaml                 # config (model: introspection)
   hipergator/
-    train.def                          # PyTorch/CUDA Singularity image (bakes weights)
+    train.def                          # PyTorch/CUDA Singularity image (bakes weights,
+                                       #   builds MonoDETR's MSDeformAttn CUDA op)
     requirements-ml.txt                # extra pip deps for the image
+    train_positionnet.sbatch           # SLURM job: PositionNet (introspection's prereq)
+    train_monodetr.sbatch              # SLURM job: MonoDETR
     train_introspection.sbatch         # SLURM job: full chain
     RUN_INTROSPECTION.md               # this file
 ```

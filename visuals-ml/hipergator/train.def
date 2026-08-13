@@ -1,35 +1,111 @@
 Bootstrap: docker
-From: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
+From: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-devel
 
 # Singularity image for training the visuals-ml baselines on HiPerGator GPUs.
 # Separate from visuals-hipergator/hiker.def (that one is the TensorFlow +
 # ImageMagick *dataset-generation* image; this one is PyTorch + CUDA for *ML*).
 #
-# Build (on a machine with singularity + sudo/fakeroot):
-#   singularity build train.sif train.def
+# Covers all three baselines: positionnet, monodetr, introspection.
+#
+# NOTE: the base image is the `-devel` variant, not `-runtime`. The runtime image
+# ships no nvcc, and MonoDETR's MultiScaleDeformableAttention op is a CUDA
+# extension that must be compiled (see %post).
+#
+# Build (on a machine with singularity + sudo/fakeroot), FROM THIS DIRECTORY —
+# the %files paths below are relative to the build working directory:
+#   cd visuals-ml/hipergator
+#   singularity build --fakeroot train.sif train.def
 
 %files
     requirements-ml.txt /tmp/requirements-ml.txt
+    ../baselines/vendor/monodetr/lib/models/monodetr/ops /tmp/ops
 
 %post
+    set -eu
     export DEBIAN_FRONTEND=noninteractive
-    # libGL + glib for opencv-python at runtime.
+    # libGL + glib for opencv-python at runtime; ninja speeds up the CUDA build.
     apt-get update && apt-get install -y --no-install-recommends \
         libgl1-mesa-glx \
         libglib2.0-0 \
+        ninja-build \
         && rm -rf /var/lib/apt/lists/*
 
     pip install --no-cache-dir --upgrade pip
     pip install --no-cache-dir -r /tmp/requirements-ml.txt
 
-    # Bake pretrained weights INTO the image. HiPerGator compute nodes usually
-    # have no internet, so the runtime alexnet(weights=DEFAULT) download would
-    # fail. Cache it here (build host has internet) at a fixed in-image path that
-    # won't be shadowed by the host $HOME bind mount at runtime.
+    # ---- Bake pretrained weights INTO the image ------------------------------
+    # HiPerGator compute nodes usually have no internet, so a runtime
+    # weights=DEFAULT download would fail. Cache them here (the build host has
+    # internet) at a fixed in-image path that won't be shadowed by the host
+    # $HOME bind mount at runtime.
+    #   alexnet  -> introspection (both streams)
+    #   resnet18 -> positionnet
+    #   resnet50 -> monodetr backbone
     export TORCH_HOME=/opt/torch-cache
     mkdir -p /opt/torch-cache
-    python -c "import torchvision; torchvision.models.alexnet(weights='DEFAULT')"
+    python -c "import torchvision as tv; tv.models.alexnet(weights='DEFAULT')"
+    python -c "import torchvision as tv; tv.models.resnet18(weights='DEFAULT')"
+    python -c "import torchvision as tv; tv.models.resnet50(weights='DEFAULT')"
     chmod -R a+rX /opt/torch-cache
+
+    # ---- Compile MonoDETR's MultiScaleDeformableAttention --------------------
+    # Without this the vendored code silently falls back to a pure-PyTorch
+    # implementation (see ops/functions/ms_deform_attn_func.py) — correct but
+    # much slower. Two upstream problems have to be patched first:
+    #   1. setup.py refuses to build unless a GPU is visible, but image builds
+    #      run on GPU-less login/build nodes. Gate on FORCE_CUDA instead.
+    #   2. upstream hardcodes -arch=sm_60 with gencodes only up to sm_75 and no
+    #      PTX, so the .so will not load on Ampere (A100, sm_80) or Hopper
+    #      (H100, sm_90). Retarget to sm_70/80/90 + PTX for forward compat.
+    #      Trim this list if your partition is a single GPU generation.
+    cd /tmp/ops
+    python - <<'PY'
+import pathlib
+import re
+
+p = pathlib.Path("setup.py")
+s = p.read_text()
+
+s, n_guard = re.subn(
+    r"if torch\.cuda\.is_available\(\) and CUDA_HOME is not None:",
+    'if (torch.cuda.is_available() or os.getenv("FORCE_CUDA") == "1") '
+    "and CUDA_HOME is not None:",
+    s,
+)
+
+s, n_arch = re.subn(
+    r'\n\s*"-arch=sm_60",\n(?:\s*"-gencode=arch=compute_\d+,code=sm_\d+",\n)+',
+    '\n            "-gencode=arch=compute_70,code=sm_70",\n'
+    '            "-gencode=arch=compute_80,code=sm_80",\n'
+    '            "-gencode=arch=compute_90,code=sm_90",\n'
+    '            "-gencode=arch=compute_90,code=compute_90",\n',
+    s,
+)
+
+# Fail the build loudly if upstream changed shape, rather than shipping a .so
+# that silently targets the wrong architecture.
+assert n_guard == 1, f"CUDA guard not patched (matched {n_guard})"
+assert n_arch == 1, f"arch list not patched (matched {n_arch})"
+assert "-arch=sm_60" not in s
+
+p.write_text(s)
+print("[info] patched ops/setup.py")
+PY
+
+    FORCE_CUDA=1 python setup.py build_ext
+    # Install only the compiled extension. `setup.py install` would also drop the
+    # generic `functions`/`modules` packages into site-packages, where they could
+    # shadow unrelated top-level imports; the Python wrappers are already in the
+    # repo tree and get imported from there.
+    SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+    cp build/lib*/MultiScaleDeformableAttention*.so "$SITE"/
+    rm -rf /tmp/ops
+
+    # Import check. Loading a CUDA extension without a visible GPU normally
+    # works, but don't fail the whole build if this particular host disagrees —
+    # the runtime check in the sbatch is what actually matters.
+    python -c "import MultiScaleDeformableAttention; print('[info] MSDeformAttn ext OK')" \
+        || echo "[warn] MSDeformAttn ext did not import at build time; verify on a GPU node"
 
 %environment
     export LC_ALL=C.UTF-8
@@ -40,4 +116,4 @@ From: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
 
 %labels
     Author visuals-dataset-generation
-    Purpose PyTorch/CUDA training for visuals-ml baselines (introspection, etc.)
+    Purpose PyTorch/CUDA training for visuals-ml baselines (positionnet, monodetr, introspection)

@@ -1,21 +1,22 @@
 #!/bin/bash
 #
-# Train the Introspective Perception baseline (Paper 1) on HiPerGator.
+# Train the PositionNet baseline (per-object 3D-centre regressor) on HiPerGator.
 #
 # Runs the full chain inside the PyTorch/CUDA Singularity image (train.sif):
-#   1. build_introspection_index      (per-frame index + temporal neighbours)
-#   2. introspection_label_prepass    (PositionNet -> per-frame failure labels)
-#   3. baselines.train                (two-stream CNN, softmax)
-#   4. baselines.introspection_svm    (fc8 -> linear SVM, EFR/RAM report)
+#   1. data.build_index      (per-object index over the visuals output tree)
+#   2. baselines.train       (PositionNet, ResNet18 two-stream)
+#   3. baselines.eval        (overall + per-weather-variant metrics)
 #
-# Steps 1-2 are skipped if the labeled index already exists. Requires a trained
-# PositionNet checkpoint (POSITIONNET_CKPT).
+# Step 1 is skipped if the index already exists.
+#
+# PositionNet is also the prerequisite for the Introspective Perception baseline:
+# its best.pt is what train_introspection.sbatch's label pre-pass consumes.
 #
 # Usage:
 #   export GROUP=<your-group> HPG_USER=$USER
-#   sbatch --account=$GROUP --qos=$GROUP train_introspection.sbatch
+#   sbatch --account=$GROUP --qos=$GROUP train_positionnet.sbatch
 #
-#SBATCH --job-name=introspection
+#SBATCH --job-name=positionnet
 # NOTE: #SBATCH lines are read by SLURM before the shell runs, so they get NO
 # parameter expansion — a ${GROUP:?...} here would be sent to SLURM verbatim.
 # Either edit the two placeholders below, or override them at submit time with
@@ -29,8 +30,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=24:00:00
-#SBATCH --output=logs/introspection_%j.out
-#SBATCH --error=logs/introspection_%j.err
+#SBATCH --output=logs/positionnet_%j.out
+#SBATCH --error=logs/positionnet_%j.err
 
 set -euo pipefail
 
@@ -49,9 +50,7 @@ set -euo pipefail
 REPO_ROOT=${REPO_ROOT:-/blue/${GROUP}/${HPG_USER}/visuals-dataset-generation}
 DATASET_OUTPUT=${DATASET_OUTPUT:-/blue/${GROUP}/${HPG_USER}/waymo/output}  # visuals_dataset output tree
 SIF=${SIF:-/blue/${GROUP}/${HPG_USER}/waymo/train.sif}
-POSITIONNET_CKPT=${POSITIONNET_CKPT:-baselines/checkpoints/positionnet/best.pt}  # relative to visuals-ml/
-CONFIG=${CONFIG:-configs/introspection.yaml}
-CAMERAS=${CAMERAS:-1}
+CONFIG=${CONFIG:-configs/positionnet.yaml}
 # -----------------------------------------------------------------------------
 
 mkdir -p logs
@@ -69,27 +68,23 @@ singularity exec --nv \
 set -euo pipefail
 cd /workspace/visuals-ml
 
-LABELED=data/output/introspection_labeled.jsonl
-if [ ! -f \"\$LABELED\" ]; then
-    echo '[info] Building introspection index + labels'
-    python -m baselines.data.build_introspection_index \
+INDEX=data/output/records.jsonl
+if [ ! -f \"\$INDEX\" ]; then
+    echo '[info] Building PositionNet index'
+    # NOTE: this is 'data.build_index' (top-level data/), not
+    # 'baselines.data.build_index' — the latter does not exist.
+    python -m data.build_index \
         --source-dir '${DATASET_OUTPUT}' \
-        --index-file data/output/introspection_records.jsonl \
-        --cameras '${CAMERAS}' --flow-stack 5
-    python -m baselines.data.introspection_label_prepass \
-        --index-file data/output/introspection_records.jsonl \
-        --checkpoint '${POSITIONNET_CKPT}' \
-        --out-file \"\$LABELED\" \
-        --tau-percentile 50 --fail-thresh 0.5
+        --index-file \"\$INDEX\"
 else
-    echo '[info] Reusing existing labeled index'
+    echo '[info] Reusing existing index'
 fi
 
-echo '[info] Training two-stream CNN'
+echo '[info] Training PositionNet'
 python -m baselines.train --config '${CONFIG}'
 
-echo '[info] Fitting linear SVM stage'
-python -m baselines.introspection_svm --config '${CONFIG}'
+echo '[info] Evaluating best checkpoint'
+python -m baselines.eval --config '${CONFIG}'
 "
 
-echo "[info] Introspection training done."
+echo "[info] PositionNet training done."
