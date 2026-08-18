@@ -11,14 +11,40 @@ From: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-devel
 # ships no nvcc, and MonoDETR's MultiScaleDeformableAttention op is a CUDA
 # extension that must be compiled (see %post).
 #
-# Build (on a machine with singularity + sudo/fakeroot), FROM THIS DIRECTORY —
-# the %files paths below are relative to the build working directory:
+# ---------------------------------------------------------------------------
+# THERE IS DELIBERATELY NO %files SECTION.
+#
+# %files is unreliable under `singularity build --fakeroot` on HiPerGator: it can
+# log "Copying ... to ..." and still leave the destination empty, so the failure
+# only surfaces later as a confusing "No such file or directory". Both things it
+# used to stage are now handled inside %post, and each is verified explicitly
+# rather than trusted:
+#   * Python deps  -> inlined as a heredoc below (no host file needed at all).
+#   * MonoDETR ops -> read from a directory bind-mounted at build time onto /mnt.
+#
+# /mnt is the mount point because it already exists in the base image. Binding
+# onto a path that does not exist in the image can fail when overlay/underlay
+# support is off, which would reintroduce exactly the class of failure we are
+# working around.
+#
+# BUILD (run from this directory; the bind source must be an ABSOLUTE path):
+#
 #   cd visuals-ml/hipergator
-#   singularity build --fakeroot train.sif train.def
-
-%files
-    requirements-ml.txt /tmp/requirements-ml.txt
-    ../baselines/vendor/monodetr/lib/models/monodetr/ops /tmp/ops
+#   OPS=$(cd ../baselines/vendor/monodetr/lib/models/monodetr/ops && pwd)
+#   singularity build --fakeroot --bind "$OPS:/mnt:ro" train.sif train.def
+#
+# The bind is read-only on purpose: %post copies the sources to /tmp/ops before
+# patching them, so the build can never write back into your checkout.
+#
+# If your site disables user bind mounts at build time (`allow user bind = no`
+# in singularity.conf), use the %setup fallback instead — %setup runs on the
+# HOST and can copy straight into the image rootfs, needing neither %files nor
+# --bind. Add this section and drop the /mnt check in %post:
+#
+#   %setup
+#       cp -a ../baselines/vendor/monodetr/lib/models/monodetr/ops \
+#             "${SINGULARITY_ROOTFS}/tmp/ops"
+# ---------------------------------------------------------------------------
 
 %post
     set -eu
@@ -30,8 +56,30 @@ From: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-devel
         ninja-build \
         && rm -rf /var/lib/apt/lists/*
 
+    # ---- Python deps (inlined; previously staged via %files) -----------------
+    # KEEP IN SYNC with hipergator/requirements-ml.txt. That file is no longer
+    # read by this build — it remains for bare (non-container) pip installs — so
+    # the two can drift if you edit one and not the other.
+    cat > /tmp/requirements-ml.txt <<'REQS'
+opencv-contrib-python>=4.8
+scikit-learn>=1.3
+scipy>=1.10
+pyyaml>=6.0
+pillow>=9.0
+numpy>=1.24
+REQS
+
+    # The heredoc cannot silently produce nothing the way %files could, but check
+    # anyway so a future edit that breaks it fails here instead of mid-install.
+    test -s /tmp/requirements-ml.txt || { echo "[error] requirements heredoc is empty"; exit 1; }
+    echo "[info] requirements to install:"; cat /tmp/requirements-ml.txt
+
     pip install --no-cache-dir --upgrade pip
     pip install --no-cache-dir -r /tmp/requirements-ml.txt
+
+    # Confirm the imports the baselines actually depend on.
+    python -c "import cv2, sklearn, scipy, yaml, PIL, numpy; print('[info] python deps OK')"
+    python -c "import cv2; assert hasattr(cv2, 'optflow'), 'opencv-contrib missing (TV-L1)'; print('[info] cv2.optflow OK')"
 
     # ---- Bake pretrained weights INTO the image ------------------------------
     # HiPerGator compute nodes usually have no internet, so a runtime
@@ -47,6 +95,24 @@ From: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-devel
     python -c "import torchvision as tv; tv.models.resnet18(weights='DEFAULT')"
     python -c "import torchvision as tv; tv.models.resnet50(weights='DEFAULT')"
     chmod -R a+rX /opt/torch-cache
+    echo "[info] cached weights:"; ls -1 /opt/torch-cache/hub/checkpoints
+
+    # ---- Stage MonoDETR ops from the build-time bind mount -------------------
+    # This is the step %files used to do. Verify it loudly: an empty or missing
+    # mount is the exact silent failure we are working around.
+    OPS_SRC=/mnt
+    if [ ! -f "$OPS_SRC/setup.py" ] || [ ! -d "$OPS_SRC/src/cuda" ]; then
+        echo "[error] MonoDETR ops sources not found at $OPS_SRC."
+        echo "[error] The build needs the ops directory bind-mounted there:"
+        echo "[error]   OPS=\$(cd ../baselines/vendor/monodetr/lib/models/monodetr/ops && pwd)"
+        echo "[error]   singularity build --fakeroot --bind \"\$OPS:/mnt:ro\" train.sif train.def"
+        echo "[error] (bind source must be an absolute path)"
+        exit 1
+    fi
+    mkdir -p /tmp/ops
+    cp -a "$OPS_SRC/." /tmp/ops/
+    test -f /tmp/ops/src/cuda/ms_deform_attn_cuda.cu || { echo "[error] ops copy incomplete"; exit 1; }
+    echo "[info] staged $(find /tmp/ops -type f | wc -l) ops files from $OPS_SRC"
 
     # ---- Compile MonoDETR's MultiScaleDeformableAttention --------------------
     # Without this the vendored code silently falls back to a pure-PyTorch
@@ -99,6 +165,9 @@ PY
     # repo tree and get imported from there.
     SITE=$(python -c "import site; print(site.getsitepackages()[0])")
     cp build/lib*/MultiScaleDeformableAttention*.so "$SITE"/
+    test -n "$(ls "$SITE"/MultiScaleDeformableAttention*.so 2>/dev/null)" \
+        || { echo "[error] compiled .so was not installed into $SITE"; exit 1; }
+    cd /
     rm -rf /tmp/ops
 
     # Import check. Loading a CUDA extension without a visible GPU normally
