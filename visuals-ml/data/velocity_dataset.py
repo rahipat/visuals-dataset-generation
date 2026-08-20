@@ -19,6 +19,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from data.paths import to_posix
+
 COORD_KEYS = [
     "cx_n_t", "cy_n_t", "sw_n_t", "sh_n_t",
     "cx_n_t1", "cy_n_t1", "sw_n_t1", "sh_n_t1",
@@ -85,8 +87,8 @@ class VelocityDataset(Dataset):
     def __getitem__(self, idx):
         r = self._records[idx]
 
-        img_t  = Image.open(r["image_t"]).convert("RGB")
-        img_t1 = Image.open(r["image_t1"]).convert("RGB")
+        img_t  = Image.open(to_posix(r["image_t"])).convert("RGB")
+        img_t1 = Image.open(to_posix(r["image_t1"])).convert("RGB")
         w, h   = img_t.size
 
         crop_t  = _to_crop_tensor(img_t.crop(_crop_box(w, h, r["cx_n_t"],  r["cy_n_t"],  r["sw_n_t"],  r["sh_n_t"])))

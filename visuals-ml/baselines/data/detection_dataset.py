@@ -33,6 +33,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from data.paths import to_posix
+
 # vendored angle encoder
 from baselines.data._vendor_path import ensure_vendor_on_path
 ensure_vendor_on_path()
@@ -77,7 +79,7 @@ class DetectionDataset(Dataset):
     def __getitem__(self, idx):
         r = self.records[idx]
         native_w, native_h = r["image_size"]
-        img = Image.open(r["image_path"]).convert("RGB")
+        img = Image.open(to_posix(r["image_path"])).convert("RGB")
         image = self._to_tensor(img)
 
         P, (fu, fv, cu, cv) = self._calib(r["intrinsic"], native_w, native_h)

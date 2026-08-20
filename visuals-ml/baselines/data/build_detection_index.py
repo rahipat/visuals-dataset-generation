@@ -98,7 +98,7 @@ def extract_records(meta_path: Path, segment_dir: Path):
     for variant in WEATHER_VARIANTS:
         img = segment_dir / "images" / camera / variant / (stem + ".jpeg")
         if img.exists():
-            yield {**base, "weather": variant, "image_path": str(img)}
+            yield {**base, "weather": variant, "image_path": img.as_posix()}
 
 
 def main():

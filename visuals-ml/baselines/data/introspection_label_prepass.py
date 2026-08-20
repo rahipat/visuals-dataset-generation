@@ -37,6 +37,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from data.paths import to_posix
 from data.dataset import (
     INPUT_KEYS, _crop_box_for, _to_crop_tensor, _to_full_tensor,
 )
@@ -67,7 +68,7 @@ def _load_positionnet(checkpoint: str, device) -> PositionNet:
 def _frame_inputs(record, device):
     """Build PositionNet inputs for every object in a frame. The full image is
     shared; crops/coords/targets are per object."""
-    img = Image.open(record["image_path"]).convert("RGB")
+    img = Image.open(to_posix(record["image_path"])).convert("RGB")
     w, h = img.size
     full = _to_full_tensor(img)
 

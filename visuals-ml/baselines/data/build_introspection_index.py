@@ -138,13 +138,13 @@ def build(source_dir: Path, cameras, flow_stack: int):
                     image_path = var_dir / (stem + ".jpeg")
                     if not image_path.exists():
                         continue
-                    ordered = [str(var_dir / (s + ".jpeg")) for s in stems]
+                    ordered = [(var_dir / (s + ".jpeg")).as_posix() for s in stems]
                     yield {
                         "frame_key": f"{seg_dir.name}|{meta.get('timestamp_micros')}",
                         "segment": meta.get("segment_context_name", seg_dir.name),
                         "camera": meta.get("camera_name", camera.split("_")[-1]),
                         "weather": variant,
-                        "image_path": str(image_path),
+                        "image_path": image_path.as_posix(),
                         "flow_frames": _flow_frames(ordered, t, flow_stack),
                         "intrinsic": {"fu": fu, "fv": fv, "cu": cu, "cv": cv},
                         "objects": objects,

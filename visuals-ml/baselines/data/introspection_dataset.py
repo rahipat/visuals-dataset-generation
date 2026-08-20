@@ -38,6 +38,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from data.paths import to_posix, to_posix_all
+
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
 FLOW_BOUND = 20.0   # px; clip displacements to +/-BOUND then scale to [-1, 1]
@@ -108,8 +110,8 @@ class IntrospectionDataset(Dataset):
     # ---- item ----------------------------------------------------------------
     def __getitem__(self, idx):
         r = self.records[idx]
-        spatial = self._spatial_tf(Image.open(r["image_path"]).convert("RGB"))
-        flow = torch.from_numpy(self._flow_stack(r["flow_frames"]))
+        spatial = self._spatial_tf(Image.open(to_posix(r["image_path"])).convert("RGB"))
+        flow = torch.from_numpy(self._flow_stack(to_posix_all(r["flow_frames"])))
         fail_frac = torch.tensor(r["fail_frac"], dtype=torch.float32)
         fail = torch.tensor(int(r["fail"]), dtype=torch.long)
         mean_err = torch.tensor(r.get("mean_err", 0.0), dtype=torch.float32)

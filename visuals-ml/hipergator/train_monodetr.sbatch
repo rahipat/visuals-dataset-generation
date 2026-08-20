@@ -74,9 +74,32 @@ cd /workspace/visuals-ml
 # but slow, so surface which path this job is on rather than letting a 195-epoch
 # run silently take the slow one.
 python -c \"
-import MultiScaleDeformableAttention  # noqa: F401
-print('[info] MSDeformAttn: compiled CUDA op (fast path)')
-\" || echo '[warn] MSDeformAttn: pure-PyTorch fallback (SLOW) — rebuild train.sif from train.def'
+import torch  # noqa: F401  MUST precede the extension import (resolves torch C++ symbols)
+try:
+    import MultiScaleDeformableAttention  # noqa: F401
+    print('[info] MSDeformAttn: compiled CUDA op (fast path)')
+except Exception as e:
+    print(f'[warn] MSDeformAttn: pure-PyTorch fallback (SLOW): {type(e).__name__}: {e}')
+    print('[warn] rebuild train.sif from train.def if this persists')
+\"
+
+# Preflight the backbone weights before committing to a long run. MonoDETR calls
+# torchvision with the legacy pretrained=True API (IMAGENET1K_V1), which is a
+# DIFFERENT file from weights='DEFAULT' (IMAGENET1K_V2) for resnet50. Compute
+# nodes have no internet and the SIF is read-only, so a cache miss surfaces as a
+# confusing 'OSError: Read-only file system'. Fail here instead, with the fix.
+python -c \"
+import os, warnings, torch, torchvision
+warnings.filterwarnings('ignore')
+print('[info] TORCH_HOME =', os.environ.get('TORCH_HOME', '<unset>'))
+try:
+    torchvision.models.resnet50(pretrained=True)
+except Exception as e:
+    print('[error] resnet50 IMAGENET1K_V1 not in baked cache:', type(e).__name__, e)
+    print('[error] rebuild train.sif; train.def must bake EVERY weight variant')
+    raise SystemExit(1)
+print('[info] resnet50 IMAGENET1K_V1 served from baked cache')
+\"
 
 INDEX=data/output/det_records.jsonl
 if [ ! -f \"\$INDEX\" ]; then

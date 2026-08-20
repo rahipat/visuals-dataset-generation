@@ -17,6 +17,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from data.paths import to_posix
+
 INPUT_KEYS = ["cx_n", "cy_n", "sw_n", "sh_n", "fu", "fv", "cu", "cv"]
 TARGET_KEYS = ["tx", "ty", "tz"]
 
@@ -86,7 +88,7 @@ class PositionDataset(Dataset):
     def __getitem__(self, idx):
         r = self._records[idx]
 
-        img = Image.open(r["image_path"]).convert("RGB")
+        img = Image.open(to_posix(r["image_path"])).convert("RGB")
         width, height = img.size
 
         crop_box = _crop_box_for(

@@ -91,11 +91,26 @@ REQS
     #   resnet50 -> monodetr backbone
     export TORCH_HOME=/opt/torch-cache
     mkdir -p /opt/torch-cache
-    python -c "import torchvision as tv; tv.models.alexnet(weights='DEFAULT')"
-    python -c "import torchvision as tv; tv.models.resnet18(weights='DEFAULT')"
-    python -c "import torchvision as tv; tv.models.resnet50(weights='DEFAULT')"
+    python - <<'WEIGHTS'
+from torchvision.models import get_model_weights
+
+# Bake EVERY weight variant of each backbone, not just DEFAULT.
+#
+# MonoDETR's backbone (vendor/.../backbone.py) uses the LEGACY api:
+#     torchvision.models.resnet50(pretrained=is_main_process(), ...)
+# `pretrained=True` resolves to IMAGENET1K_V1, whereas weights="DEFAULT"
+# resolves to IMAGENET1K_V2 for resnet50 -- a DIFFERENT checkpoint file.
+# Baking only DEFAULT therefore left a cache miss, and the runtime download
+# attempt died with "OSError: Read-only file system" because the SIF is
+# immutable. Enumerating every variant makes the cache hit regardless of which
+# API the model code uses.
+for name in ("alexnet", "resnet18", "resnet50"):
+    for w in get_model_weights(name):
+        w.get_state_dict(progress=False)
+        print(f"[info] cached {name}: {w.name}")
+WEIGHTS
     chmod -R a+rX /opt/torch-cache
-    echo "[info] cached weights:"; ls -1 /opt/torch-cache/hub/checkpoints
+    echo "[info] cached weight files:"; ls -1 /opt/torch-cache/hub/checkpoints
 
     # ---- Stage MonoDETR ops from the build-time bind mount -------------------
     # This is the step %files used to do. Verify it loudly: an empty or missing
@@ -173,7 +188,10 @@ PY
     # Import check. Loading a CUDA extension without a visible GPU normally
     # works, but don't fail the whole build if this particular host disagrees —
     # the runtime check in the sbatch is what actually matters.
-    python -c "import MultiScaleDeformableAttention; print('[info] MSDeformAttn ext OK')" \
+    # `import torch` MUST come first: the extension links against torch's C++
+    # symbols, and importing it standalone fails with an undefined-symbol error
+    # even when the .so is perfectly good.
+    python -c "import torch; import MultiScaleDeformableAttention; print('[info] MSDeformAttn ext OK')" \
         || echo "[warn] MSDeformAttn ext did not import at build time; verify on a GPU node"
 
 %environment

@@ -129,8 +129,8 @@ def main():
                         "laser_id":   laser_id,
                         "weather":    variant,
                         "delta_t":    delta_t,
-                        "image_t":    str(path_t),
-                        "image_t1":   str(path_t1),
+                        "image_t":    path_t.as_posix(),
+                        "image_t1":   path_t1.as_posix(),
                         # box coords at T
                         "cx_n_t":  f_t["cx_n"],  "cy_n_t":  f_t["cy_n"],
                         "sw_n_t":  f_t["sw_n"],  "sh_n_t":  f_t["sh_n"],
