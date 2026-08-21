@@ -24,6 +24,7 @@ calib fx and box-height in pixels) is internally consistent.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
 
@@ -35,6 +36,8 @@ from torchvision import transforms
 
 from data.paths import to_posix
 from data.robust_load import load_skipping_corrupt
+
+logger = logging.getLogger(__name__)
 
 # vendored angle encoder
 from baselines.data._vendor_path import ensure_vendor_on_path
@@ -107,6 +110,17 @@ class DetectionDataset(Dataset):
                 break
             cx, cy, w, h = o["box_2d"]                 # native pixels
             x, y, z = o["loc"]                         # optical frame, metres
+            # Guard against NaN/Inf leftovers from earlier pipeline failures:
+            # Python's `<`/`min()` are always False/skip-through on NaN, so an
+            # unchecked NaN here would sail past the z<=1e-3 guard below and
+            # later past the min(...)<0 clip, landing in boxes_3d unclamped
+            # and tripping the xyxy-conversion assert deep in the loss.
+            if not all(math.isfinite(v) for v in (cx, cy, w, h, x, y, z)):
+                logger.warning("Skipping object with non-finite box_2d/loc: %s", o)
+                continue
+            if w <= 0 or h <= 0:
+                logger.warning("Skipping degenerate zero/negative-size box_2d: %s", o)
+                continue
             if z <= 1e-3:
                 continue
             # projected 3D center in resolution pixels (pinhole, scaled intrinsics)
@@ -123,6 +137,9 @@ class DetectionDataset(Dataset):
             y2_n = (cy + h / 2) / native_h
             l, rr = cx3d_n - x1_n, x2_n - cx3d_n
             t, bb = cy3d_n - y1_n, y2_n - cy3d_n
+            if not all(math.isfinite(v) for v in (l, rr, t, bb)):
+                logger.warning("Skipping object with non-finite cxcylrtb box: %s", o)
+                continue
             if min(l, rr, t, bb) < 0:
                 if self.clip_2d:
                     l, rr = max(l, 0.0), max(rr, 0.0)
