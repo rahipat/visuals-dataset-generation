@@ -27,8 +27,8 @@ class _PositionWeatherDataset(PositionDataset):
     """PositionDataset that also returns the weather variant of each sample."""
 
     def __getitem__(self, idx):
-        image, crop, coords, target = super().__getitem__(idx)
-        weather = self._records[idx].get("weather", "unknown")
+        _, r, image, crop, coords, target = self._build_sample(idx)
+        weather = r.get("weather", "unknown")
         return image, crop, coords, target, weather
 
 

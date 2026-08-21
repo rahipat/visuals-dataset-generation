@@ -9,15 +9,18 @@ Each sample is:
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Tuple
 
 import torch
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset
 from torchvision import transforms
 
 from data.paths import to_posix
+
+logger = logging.getLogger(__name__)
 
 INPUT_KEYS = ["cx_n", "cy_n", "sw_n", "sh_n", "fu", "fv", "cu", "cv"]
 TARGET_KEYS = ["tx", "ty", "tz"]
@@ -85,10 +88,29 @@ class PositionDataset(Dataset):
     def __len__(self):
         return len(self._records)
 
-    def __getitem__(self, idx):
-        r = self._records[idx]
+    def _load_image(self, idx):
+        """Open the image for idx, skipping corrupt/empty files by advancing
+        to the next record (wrapping around). Returns (resolved_idx, record,
+        PIL Image) so callers needing the record (e.g. for weather) don't
+        redo the lookup or go stale relative to a skipped index."""
+        n = len(self._records)
+        for offset in range(n):
+            i = (idx + offset) % n
+            r = self._records[i]
+            path = to_posix(r["image_path"])
+            try:
+                img = Image.open(path)
+                img.load()  # force decode now so truncated/empty files raise here
+                return i, r, img.convert("RGB")
+            except (OSError, UnidentifiedImageError) as e:
+                logger.warning(
+                    "Skipping corrupt/unreadable image at index %d: %s (%s)",
+                    i, path, e,
+                )
+        raise RuntimeError("PositionDataset: no readable images found in index")
 
-        img = Image.open(to_posix(r["image_path"])).convert("RGB")
+    def _build_sample(self, idx):
+        i, r, img = self._load_image(idx)
         width, height = img.size
 
         crop_box = _crop_box_for(
@@ -103,4 +125,8 @@ class PositionDataset(Dataset):
         coords = torch.tensor([r[k] for k in INPUT_KEYS], dtype=torch.float32)
         target = torch.tensor([r[k] for k in TARGET_KEYS], dtype=torch.float32)
 
+        return i, r, image, crop, coords, target
+
+    def __getitem__(self, idx):
+        _, _, image, crop, coords, target = self._build_sample(idx)
         return image, crop, coords, target

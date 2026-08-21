@@ -23,7 +23,7 @@ import torch
 
 import baselines.models  # noqa: F401  (registers the model)
 from baselines.core.registry import build_model
-from baselines.core.runner import _make_loader
+from baselines.core.runner import _make_loader, _maybe_cap
 from baselines.core.utils import load_config
 from baselines.models.introspection import _auroc
 
@@ -64,6 +64,8 @@ def main():
 
     model = build_model(cfg)
     train_set, val_set = model.build_datasets(cfg)
+    train_set, val_set = _maybe_cap(train_set, cfg), _maybe_cap(val_set, cfg)
+    print(f"Train: {len(train_set)}  Val: {len(val_set)}")
     model.to(device)
     ckpt = torch.load(checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"])
