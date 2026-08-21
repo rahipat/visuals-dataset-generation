@@ -84,6 +84,15 @@ class HungarianMatcher(nn.Module):
 
         # Final cost matrix
         C = self.cost_bbox * cost_bbox + self.cost_3dcenter * cost_3dcenter + self.cost_class * cost_class + self.cost_giou * cost_giou
+        # VISUALS-MOD: cost_class's log()-based focal-loss formula (line ~64)
+        # can still go non-finite if pred_logits ever go NaN/Inf upstream
+        # (e.g. training instability), independent of the box-side NaNs
+        # already fixed in box_ops.py. scipy's linear_sum_assignment hard-
+        # errors ("matrix contains invalid numeric entries") on any NaN/Inf,
+        # so sanitize as a last line of defense: treat any non-finite entry
+        # as maximally undesirable (a large but finite cost) rather than
+        # guessing it means a great match.
+        C = torch.nan_to_num(C, nan=1e6, posinf=1e6, neginf=1e6)
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]

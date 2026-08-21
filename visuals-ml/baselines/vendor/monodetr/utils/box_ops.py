@@ -56,7 +56,13 @@ def box_iou(boxes1, boxes2):
 
     union = area1[:, None] + area2 - inter
 
-    iou = inter / union
+    # VISUALS-MOD: a zero-area box (degenerate, but now valid post-clamp in
+    # box_cxcylrtb_to_xyxy) paired with another zero/near-zero-area box makes
+    # union exactly 0, so inter/union is 0/0 == NaN -- which then blows up
+    # matcher.py's cost matrix and crashes linear_sum_assignment. Floor the
+    # denominator instead of dividing by exactly 0; a degenerate box has no
+    # meaningful overlap with anything, so IoU -> 0 is the sane limit.
+    iou = inter / union.clamp(min=1e-7)
     return iou, union
 
 
@@ -81,7 +87,9 @@ def generalized_box_iou(boxes1, boxes2):
     wh = (rb - lt).clamp(min=0)  # [N,M,2]
     area = wh[:, :, 0] * wh[:, :, 1]
 
-    return iou - (area - union) / area
+    # VISUALS-MOD: same 0/0 risk as above -- two coincident degenerate boxes
+    # give an enclosing box of exactly 0 area too. Floor it the same way.
+    return iou - (area - union) / area.clamp(min=1e-7)
 
 
 def masks_to_boxes(masks):
