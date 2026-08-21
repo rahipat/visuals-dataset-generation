@@ -20,6 +20,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from data.paths import to_posix
+from data.robust_load import load_skipping_corrupt
 
 COORD_KEYS = [
     "cx_n_t", "cy_n_t", "sw_n_t", "sh_n_t",
@@ -85,11 +86,17 @@ class VelocityDataset(Dataset):
         return len(self._records)
 
     def __getitem__(self, idx):
-        r = self._records[idx]
+        def build(i):
+            r = self._records[i]
+            img_t = Image.open(to_posix(r["image_t"]))
+            img_t.load()  # force decode now so truncated/empty files raise here
+            img_t1 = Image.open(to_posix(r["image_t1"]))
+            img_t1.load()
+            return r, img_t.convert("RGB"), img_t1.convert("RGB")
 
-        img_t  = Image.open(to_posix(r["image_t"])).convert("RGB")
-        img_t1 = Image.open(to_posix(r["image_t1"])).convert("RGB")
-        w, h   = img_t.size
+        _, (r, img_t, img_t1) = load_skipping_corrupt(
+            len(self._records), idx, build, context="VelocityDataset")
+        w, h = img_t.size
 
         crop_t  = _to_crop_tensor(img_t.crop(_crop_box(w, h, r["cx_n_t"],  r["cy_n_t"],  r["sw_n_t"],  r["sh_n_t"])))
         crop_t1 = _to_crop_tensor(img_t1.crop(_crop_box(w, h, r["cx_n_t1"], r["cy_n_t1"], r["sw_n_t1"], r["sh_n_t1"])))

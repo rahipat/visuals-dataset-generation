@@ -34,6 +34,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from data.paths import to_posix
+from data.robust_load import load_skipping_corrupt
 
 # vendored angle encoder
 from baselines.data._vendor_path import ensure_vendor_on_path
@@ -77,9 +78,15 @@ class DetectionDataset(Dataset):
         return P, (fu, fv, cu, cv)
 
     def __getitem__(self, idx):
-        r = self.records[idx]
+        def build(i):
+            r = self.records[i]
+            img = Image.open(to_posix(r["image_path"]))
+            img.load()  # force decode now so truncated/empty files raise here
+            return r, img.convert("RGB")
+
+        _, (r, img) = load_skipping_corrupt(
+            len(self.records), idx, build, context="DetectionDataset")
         native_w, native_h = r["image_size"]
-        img = Image.open(to_posix(r["image_path"])).convert("RGB")
         image = self._to_tensor(img)
 
         P, (fu, fv, cu, cv) = self._calib(r["intrinsic"], native_w, native_h)
