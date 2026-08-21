@@ -18,7 +18,19 @@ def box_cxcywh_to_xyxy(x):
 
 
 def box_cxcylrtb_to_xyxy(x):
+    # VISUALS-MOD: l/r/t/b are meant to be non-negative distances from the
+    # center to each edge (predicted boxes are sigmoid-bounded to [0, 1] by
+    # the decoder, and the dataset clamps ground-truth the same way), but
+    # nothing enforces that here -- and NaN/Inf can still reach this function
+    # if the network's raw logits go non-finite (e.g. early-training
+    # divergence), since NaN.sigmoid() == NaN. generalized_box_iou()'s
+    # degenerate-box assert then hard-crashes the whole run on a single bad
+    # box. Sanitize at this boundary instead: replace non-finite values with
+    # 0 and clamp the four distances to >=0, so callers always get a
+    # well-formed (possibly zero-area) box regardless of what produced it.
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     x_c, y_c, l, r, t, b = x.unbind(-1)
+    l, r, t, b = l.clamp(min=0.0), r.clamp(min=0.0), t.clamp(min=0.0), b.clamp(min=0.0)
     bb = [(x_c - l), (y_c - t),
          (x_c + r), (y_c + b)]
     return torch.stack(bb, dim=-1)
