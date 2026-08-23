@@ -82,6 +82,7 @@ class PositionDataset(Dataset):
                 line = line.strip()
                 if line:
                     self._records.append(json.loads(line))
+        self._bad_indices = set()
 
     def __len__(self):
         return len(self._records)
@@ -94,7 +95,8 @@ class PositionDataset(Dataset):
             return r, img.convert("RGB")
 
         i, (r, img) = load_skipping_corrupt(
-            len(self._records), idx, build, context="PositionDataset")
+            len(self._records), idx, build, context="PositionDataset",
+            bad_indices=self._bad_indices)
         width, height = img.size
 
         crop_box = _crop_box_for(

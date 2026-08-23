@@ -64,6 +64,7 @@ class DetectionDataset(Dataset):
         self.res_w, self.res_h = int(resolution[0]), int(resolution[1])
         self.mean_size = np.asarray(mean_size, dtype=np.float32)
         self.clip_2d = clip_2d
+        self._bad_indices = set()
         self._to_tensor = transforms.Compose([
             transforms.Resize((self.res_h, self.res_w)),
             transforms.ToTensor(),
@@ -88,7 +89,8 @@ class DetectionDataset(Dataset):
             return r, img.convert("RGB")
 
         _, (r, img) = load_skipping_corrupt(
-            len(self.records), idx, build, context="DetectionDataset")
+            len(self.records), idx, build, context="DetectionDataset",
+            bad_indices=self._bad_indices)
         native_w, native_h = r["image_size"]
         image = self._to_tensor(img)
 

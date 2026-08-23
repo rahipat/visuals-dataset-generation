@@ -81,6 +81,7 @@ class VelocityDataset(Dataset):
                 line = line.strip()
                 if line:
                     self._records.append(json.loads(line))
+        self._bad_indices = set()
 
     def __len__(self):
         return len(self._records)
@@ -95,7 +96,8 @@ class VelocityDataset(Dataset):
             return r, img_t.convert("RGB"), img_t1.convert("RGB")
 
         _, (r, img_t, img_t1) = load_skipping_corrupt(
-            len(self._records), idx, build, context="VelocityDataset")
+            len(self._records), idx, build, context="VelocityDataset",
+            bad_indices=self._bad_indices)
         w, h = img_t.size
 
         crop_t  = _to_crop_tensor(img_t.crop(_crop_box(w, h, r["cx_n_t"],  r["cy_n_t"],  r["sw_n_t"],  r["sh_n_t"])))

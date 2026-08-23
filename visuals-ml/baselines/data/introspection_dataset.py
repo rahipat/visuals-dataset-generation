@@ -66,6 +66,7 @@ class IntrospectionDataset(Dataset):
         if self.flow_cache:
             self.flow_cache.mkdir(parents=True, exist_ok=True)
         self._flow = None  # lazily built per worker (cv2 objects aren't picklable)
+        self._bad_indices = set()
         self._spatial_tf = transforms.Compose([
             transforms.Resize((self.res, self.res)),
             transforms.ToTensor(),
@@ -121,7 +122,8 @@ class IntrospectionDataset(Dataset):
             return r, spatial, flow
 
         _, (r, spatial, flow) = load_skipping_corrupt(
-            len(self.records), idx, build, context="IntrospectionDataset")
+            len(self.records), idx, build, context="IntrospectionDataset",
+            bad_indices=self._bad_indices)
         fail_frac = torch.tensor(r["fail_frac"], dtype=torch.float32)
         fail = torch.tensor(int(r["fail"]), dtype=torch.long)
         mean_err = torch.tensor(r.get("mean_err", 0.0), dtype=torch.float32)
