@@ -27,9 +27,10 @@ class _PositionWeatherDataset(PositionDataset):
     """PositionDataset that also returns the weather variant of each sample."""
 
     def __getitem__(self, idx):
-        _, r, image, crop, coords, target = self._build_sample(idx)
-        weather = r.get("weather", "unknown")
-        return image, crop, coords, target, weather
+        i, image, crop, coords, target = self._build_sample(idx)
+        # Key off the resolved index: a corrupt file makes the loader fall
+        # through to a later record, so idx may not be what was returned.
+        return image, crop, coords, target, self.weather_at(i)
 
 
 @register_model("positionnet")

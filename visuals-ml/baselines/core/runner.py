@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Subset
 logger = logging.getLogger(__name__)
 
 LOG_INTERVAL = 50
+MEMORY_LOG_INTERVAL = 1000
 MAX_CONSECUTIVE_NONFINITE_LOSS = 5
 
 
@@ -27,43 +28,104 @@ def _maybe_cap(dataset, cfg):
 
 
 def _build_optimizer(model, cfg):
-    """Plain Adam unless cfg['weight_decay'] is set, in which case AdamW with
-    decoupled weight decay (the standard choice for transformer-style models
-    like MonoDETR -- see vendor/monodetr/lib/helpers/optimizer_helper.py).
-    Opt-in and defaults to the old behavior so it doesn't change any config
-    that doesn't ask for it."""
+    """Adam, or AdamW when cfg['weight_decay'] is set. cfg['lr_backbone'] puts
+    backbone parameters in their own lower-LR group -- the DETR-family
+    convention (backbone is pretrained and needs far gentler updates than the
+    randomly-initialised transformer/heads). MonoDETR trains its backbone
+    (train_backbone: True in the adapter) but the harness previously drove
+    every parameter at one LR. All keys opt-in; defaults reproduce the old
+    plain-Adam behavior for configs that don't set them."""
     weight_decay = cfg.get("weight_decay", 0.0)
+    lr = cfg["lr"]
+    lr_backbone = cfg.get("lr_backbone")
+
+    params = model.parameters()
+    if lr_backbone is not None:
+        backbone, rest = [], []
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                (backbone if "backbone" in name else rest).append(p)
+        if not backbone:
+            # Name-matching is a convention, not a contract -- don't silently
+            # train everything at the wrong LR if a model names things
+            # differently.
+            logger.warning(
+                "lr_backbone=%g set but no parameter name contains 'backbone'; "
+                "using a single LR group.", lr_backbone)
+        else:
+            params = [{"params": rest, "lr": lr},
+                      {"params": backbone, "lr": lr_backbone}]
+            print(f"Optimizer param groups: {len(rest)} @ lr={lr:g}, "
+                  f"{len(backbone)} backbone @ lr={lr_backbone:g}")
+
     if weight_decay:
-        return torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=weight_decay)
-    return torch.optim.Adam(model.parameters(), lr=cfg["lr"])
+        return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    return torch.optim.Adam(params, lr=lr)
 
 
-def _build_scheduler(optimizer, cfg):
-    """Optional linear warmup (cfg['warmup_epochs']) composed with an optional
-    step decay (cfg['lr_drop']). Mirrors the warmup+decay shape the vendored
-    MonoDETR training recipe uses (vendor/monodetr/lib/helpers/trainer_helper.py
-    steps a warmup scheduler for epoch<5, then a decay scheduler) -- our
-    generic runner previously had neither, running a flat, undecayed LR for
-    the whole run. Both keys are opt-in; returns None (flat LR, old behavior)
-    if neither is set."""
-    warmup_epochs = cfg.get("warmup_epochs", 0)
+def _build_scheduler(optimizer, cfg, steps_per_epoch):
+    """Per-ITERATION linear warmup (cfg['warmup_iters']) followed by step decay
+    every cfg['lr_drop'] epochs.
+
+    Deliberately iteration-granular: this dataset runs ~29k batches per epoch,
+    so an epoch-granular warmup is a coarse staircase that jumps most of the
+    way to full LR after a single epoch -- it does not do the thing warmup
+    exists to do, which is keep the first few hundred/thousand steps small
+    while Adam's second-moment estimates are still noisy. LambdaLR scales each
+    param group off its own initial_lr, so a separate backbone LR group is
+    warmed and decayed proportionally. Returns None (flat LR) when unset."""
+    warmup_iters = cfg.get("warmup_iters", 0)
     lr_drop = cfg.get("lr_drop")
+    gamma = cfg.get("lr_drop_gamma", 0.1)
+    start_factor = cfg.get("warmup_start_factor", 0.01)
 
-    schedulers, milestones = [], []
-    if warmup_epochs:
-        schedulers.append(torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.1, total_iters=warmup_epochs))
-        milestones.append(warmup_epochs)
-    if lr_drop is not None:
-        schedulers.append(torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=lr_drop, gamma=cfg.get("lr_drop_gamma", 0.1)))
-
-    if not schedulers:
+    if not warmup_iters and lr_drop is None:
         return None
-    if len(schedulers) == 1:
-        return schedulers[0]
-    return torch.optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=schedulers, milestones=milestones)
+
+    def factor(step):
+        if warmup_iters and step < warmup_iters:
+            return start_factor + (1.0 - start_factor) * (step / warmup_iters)
+        if lr_drop and steps_per_epoch:
+            return gamma ** ((step // steps_per_epoch) // lr_drop)
+        return 1.0
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
+def _memory_report():
+    """One-line host/GPU memory snapshot. Worker RSS is the number that matters
+    here: forked DataLoader workers are separate processes, so the parent's own
+    RSS hides most of a dataset-side leak."""
+    parts = []
+    try:
+        import os
+        import psutil
+        proc = psutil.Process(os.getpid())
+        rss = proc.memory_info().rss
+        kids = [c.memory_info().rss for c in proc.children(recursive=True)]
+        parts.append(f"rss={rss/1e9:.2f}GB")
+        if kids:
+            parts.append(f"workers={sum(kids)/1e9:.2f}GB(n={len(kids)},"
+                         f"max={max(kids)/1e9:.2f}GB)")
+        parts.append(f"host_total={(rss + sum(kids))/1e9:.2f}GB")
+    except ImportError:
+        try:
+            import resource
+            import sys as _sys
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            # ru_maxrss is bytes on macOS, kilobytes on Linux.
+            scale = 1e9 if _sys.platform == "darwin" else 1e6
+            parts.append(f"peak_rss={peak/scale:.2f}GB (install psutil for "
+                         "per-worker RSS)")
+        except Exception:
+            return "memory: unavailable"
+    except Exception as e:  # psutil present but query failed
+        return f"memory: unavailable ({e})"
+
+    if torch.cuda.is_available():
+        parts.append(f"cuda_alloc={torch.cuda.memory_allocated()/1e9:.2f}GB "
+                     f"cuda_peak={torch.cuda.max_memory_allocated()/1e9:.2f}GB")
+    return "  ".join(parts)
 
 
 def _make_loader(dataset, model, cfg, *, shuffle, device):
@@ -92,7 +154,8 @@ def train(model, cfg, device, resume=None):
 
     model.to(device)
     optimizer = _build_optimizer(model, cfg)
-    scheduler = _build_scheduler(optimizer, cfg)
+    steps_per_epoch = len(train_loader)
+    scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch)
     use_cuda = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
     clip_max_norm = cfg.get("clip_max_norm")  # None disables clipping
@@ -113,20 +176,22 @@ def train(model, cfg, device, resume=None):
         best_monitor = ckpt.get("monitor", float("inf"))
         print(f"Resumed from epoch {ckpt['epoch']} (monitor={best_monitor:.4f})")
 
-    if scheduler is not None:
-        # Deterministic StepLR/LinearLR state depends only on epoch count, so
-        # fast-forward by stepping once per already-completed epoch rather
-        # than persisting scheduler state in the checkpoint.
-        for _ in range(start_epoch - 1):
+    if scheduler is not None and start_epoch > 1:
+        # The LR factor is a pure function of the global step count, so
+        # fast-forward instead of persisting scheduler state in the checkpoint.
+        for _ in range((start_epoch - 1) * steps_per_epoch):
             scheduler.step()
+        print(f"Scheduler fast-forwarded to step "
+              f"{(start_epoch - 1) * steps_per_epoch}  "
+              f"lr={optimizer.param_groups[0]['lr']:.3g}")
+
+    print(f"Startup memory: {_memory_report()}", flush=True)
 
     for epoch in range(start_epoch, cfg["epochs"] + 1):
         train_loss = _run_train_epoch(
             model, train_loader, optimizer, scaler, device, epoch, cfg["epochs"],
-            clip_max_norm,
+            clip_max_norm, scheduler,
         )
-        if scheduler is not None:
-            scheduler.step()
 
         metrics = model.evaluate(val_loader, device)
         monitor = metrics["monitor"]
@@ -135,21 +200,31 @@ def train(model, cfg, device, resume=None):
             if k != "monitor" and isinstance(v, (int, float))
         )
         print(f"Epoch {epoch:3d}/{cfg['epochs']}  train_loss={train_loss:.4f}  "
-              f"monitor={monitor:.4f}  {extra}", flush=True)
+              f"monitor={monitor:.4f}  lr={optimizer.param_groups[0]['lr']:.3g}  "
+              f"{extra}", flush=True)
+        print(f"  memory: {_memory_report()}", flush=True)
+
+        state = {"epoch": epoch, "model": model.state_dict(),
+                 "optimizer": optimizer.state_dict(),
+                 "monitor": monitor, "metrics": metrics, "config": cfg}
+
+        # Rolling latest.pt every epoch, so an OOM/divergence/preemption costs
+        # at most one epoch rather than everything since the last improvement.
+        # Written to a temp file and renamed so a crash mid-write can't leave a
+        # truncated checkpoint where a resumable one used to be.
+        tmp = checkpoint_dir / "latest.pt.tmp"
+        torch.save(state, tmp)
+        tmp.replace(checkpoint_dir / "latest.pt")
+        print(f"  --> latest.pt saved (epoch {epoch})", flush=True)
 
         if monitor < best_monitor:
             best_monitor = monitor
-            torch.save(
-                {"epoch": epoch, "model": model.state_dict(),
-                 "optimizer": optimizer.state_dict(),
-                 "monitor": monitor, "metrics": metrics, "config": cfg},
-                checkpoint_dir / "best.pt",
-            )
+            torch.save(state, checkpoint_dir / "best.pt")
             print(f"  --> checkpoint saved (monitor={monitor:.4f})", flush=True)
 
 
 def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epochs,
-                     clip_max_norm=None):
+                     clip_max_norm=None, scheduler=None):
     model.train()
     total_loss = 0.0
     n_samples = 0
@@ -186,11 +261,16 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
                     "weight decay before restarting, or this will likely recur."
                 )
             # Known-bad batch: skip backward/step entirely rather than waste
-            # compute on a gradient that can only be garbage.
+            # compute on a gradient that can only be garbage. The LR schedule
+            # still advances, so the warmup/decay curve stays tied to the
+            # global step count rather than drifting on skipped batches.
+            if scheduler is not None:
+                scheduler.step()
             continue
 
         consecutive_nonfinite = 0
         scaler.scale(loss).backward()
+
         if clip_max_norm:
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
@@ -203,6 +283,8 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
                 )
         scaler.step(optimizer)
         scaler.update()
+        if scheduler is not None:
+            scheduler.step()
 
         bs = logs.get("batch_size", 1)
         total_loss += loss.item() * bs
@@ -211,7 +293,16 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
         if (batch_idx + 1) % LOG_INTERVAL == 0 or (batch_idx + 1) == n_batches:
             extra = "  ".join(f"{k}={v:.4f}" for k, v in logs.items() if k != "batch_size")
             print(f"  [train] epoch {epoch}/{total_epochs}  "
-                  f"batch {batch_idx+1}/{n_batches}  loss={loss.item():.4f}  {extra}",
+                  f"batch {batch_idx+1}/{n_batches}  loss={loss.item():.4f}  "
+                  f"lr={optimizer.param_groups[0]['lr']:.3g}  {extra}",
+                  flush=True)
+
+        # Periodic memory trace: a steadily climbing host_total/workers figure
+        # across an epoch is the signature of a dataset-side leak, as opposed
+        # to a one-off spike from a large batch.
+        if (batch_idx + 1) % MEMORY_LOG_INTERVAL == 0:
+            print(f"  [mem] epoch {epoch}/{total_epochs}  "
+                  f"batch {batch_idx+1}/{n_batches}  {_memory_report()}",
                   flush=True)
 
     return total_loss / max(n_samples, 1)

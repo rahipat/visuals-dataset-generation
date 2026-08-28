@@ -12,3 +12,6 @@ scipy>=1.10                  # linear_sum_assignment for MonoDETR's Hungarian ma
 pyyaml>=6.0                  # config loading
 pillow>=9.0                  # image IO
 numpy>=1.24
+psutil>=5.9                  # per-DataLoader-worker RSS in the runner's memory log
+                             # (falls back to resource.getrusage without it, which
+                             # can't see forked worker processes)

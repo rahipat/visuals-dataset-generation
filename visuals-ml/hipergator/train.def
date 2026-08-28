@@ -67,6 +67,7 @@ scipy>=1.10
 pyyaml>=6.0
 pillow>=9.0
 numpy>=1.24
+psutil>=5.9
 REQS
 
     # The heredoc cannot silently produce nothing the way %files could, but check
@@ -78,7 +79,7 @@ REQS
     pip install --no-cache-dir -r /tmp/requirements-ml.txt
 
     # Confirm the imports the baselines actually depend on.
-    python -c "import cv2, sklearn, scipy, yaml, PIL, numpy; print('[info] python deps OK')"
+    python -c "import cv2, sklearn, scipy, yaml, PIL, numpy, psutil; print('[info] python deps OK')"
     python -c "import cv2; assert hasattr(cv2, 'optflow'), 'opencv-contrib missing (TV-L1)'; print('[info] cv2.optflow OK')"
 
     # ---- Bake pretrained weights INTO the image ------------------------------
