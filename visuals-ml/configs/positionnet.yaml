@@ -11,4 +11,7 @@ seed: 42
 
 lr: 1.0e-4
 epochs: 30
+# An epoch here is ~170k batches (many hours), so wait for an epoch boundary and
+# a crash costs most of a day. Snapshot latest.pt mid-epoch too.
+checkpoint_every_n_batches: 20000
 checkpoint_dir: baselines/checkpoints/positionnet

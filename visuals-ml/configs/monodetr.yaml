@@ -38,4 +38,7 @@ epochs: 30              # ~878k steps, still ~20x the reference run's total.
                         # improving at the end.
 lr_drop: 20             # decay 10x at epoch 20 (~2/3 through)
 lr_drop_gamma: 0.1
+# ~29k batches/epoch; snapshot latest.pt mid-epoch so a crash costs <1h, not a
+# whole epoch.
+checkpoint_every_n_batches: 5000
 checkpoint_dir: baselines/checkpoints/monodetr

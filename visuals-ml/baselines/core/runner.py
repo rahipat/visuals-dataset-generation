@@ -6,6 +6,7 @@ about a specific baseline beyond the BaselineModel contract (core/interface.py).
 """
 
 import logging
+import time
 from pathlib import Path
 
 import torch
@@ -92,6 +93,14 @@ def _build_scheduler(optimizer, cfg, steps_per_epoch):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
+def _atomic_save(state, path):
+    """Write via a temp file + rename so a crash mid-write can't leave a
+    truncated checkpoint where a resumable one used to be."""
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(state, tmp)
+    tmp.replace(path)
+
+
 def _memory_report():
     """One-line host/GPU memory snapshot. Worker RSS is the number that matters
     here: forked DataLoader workers are separate processes, so the parent's own
@@ -173,8 +182,17 @@ def train(model, cfg, device, resume=None):
         else:
             print("  (no optimizer state in checkpoint -- Adam moments restart from scratch)")
         start_epoch = ckpt["epoch"] + 1
-        best_monitor = ckpt.get("monitor", float("inf"))
-        print(f"Resumed from epoch {ckpt['epoch']} (monitor={best_monitor:.4f})")
+        # Prefer the running best over this checkpoint's own monitor: latest.pt
+        # is whatever ran last, not necessarily the best, so keying off its
+        # monitor would let a worse epoch overwrite best.pt after a resume.
+        best_monitor = ckpt.get("best_monitor")
+        if best_monitor is None:
+            best_monitor = ckpt.get("monitor") or float("inf")
+        print(f"Resumed from epoch {ckpt['epoch']} (best_monitor={best_monitor:.4f})")
+        if ckpt.get("in_progress_batch"):
+            print(f"  (checkpoint was a mid-epoch snapshot from epoch "
+                  f"{ckpt['in_progress_epoch']} batch {ckpt['in_progress_batch']}; "
+                  f"epoch {ckpt['in_progress_epoch']} restarts from its beginning)")
 
     if scheduler is not None and start_epoch > 1:
         # The LR factor is a pure function of the global step count, so
@@ -187,44 +205,86 @@ def train(model, cfg, device, resume=None):
 
     print(f"Startup memory: {_memory_report()}", flush=True)
 
+    # Epochs here are enormous (PositionNet: ~170k batches, many hours), so
+    # per-epoch checkpointing is still coarse. Snapshot mid-epoch too when
+    # asked. A mid-epoch snapshot records the LAST FULLY COMPLETED epoch, so
+    # resuming replays the interrupted epoch from its start rather than
+    # silently skipping the batches it never got to.
+    ckpt_every = cfg.get("checkpoint_every_n_batches")
+
+    def _snapshot(epoch, *, completed_epoch, train_loss=None, metrics=None,
+                  monitor=None, batch=None):
+        _atomic_save({
+            "epoch": completed_epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "best_monitor": best_monitor,   # so resume keeps the running best
+            "monitor": monitor,
+            "metrics": metrics,
+            "train_loss": train_loss,
+            "in_progress_epoch": epoch if batch is not None else None,
+            "in_progress_batch": batch,
+            "config": cfg,
+        }, checkpoint_dir / "latest.pt")
+
     for epoch in range(start_epoch, cfg["epochs"] + 1):
+        on_batch_ckpt = None
+        if ckpt_every:
+            def on_batch_ckpt(batch_idx, _epoch=epoch):
+                _snapshot(_epoch, completed_epoch=_epoch - 1, batch=batch_idx)
+                print(f"  --> latest.pt snapshot (epoch {_epoch}, "
+                      f"batch {batch_idx}; resume replays this epoch)",
+                      flush=True)
+
         train_loss = _run_train_epoch(
             model, train_loader, optimizer, scaler, device, epoch, cfg["epochs"],
-            clip_max_norm, scheduler,
+            clip_max_norm, scheduler, on_batch_ckpt, ckpt_every,
         )
 
+        # Save BEFORE validating. Validation is a full pass over the val split
+        # (~42k batches for PositionNet) and emits no output, so a crash, hang,
+        # or preemption in there used to discard the entire epoch of training
+        # that had just finished.
+        _snapshot(epoch, completed_epoch=epoch, train_loss=train_loss)
+        print(f"Epoch {epoch:3d}/{cfg['epochs']}  train_loss={train_loss:.4f}  "
+              f"lr={optimizer.param_groups[0]['lr']:.3g}", flush=True)
+        print(f"  --> latest.pt saved (epoch {epoch}, pre-validation)", flush=True)
+        print(f"  memory: {_memory_report()}", flush=True)
+
+        # Announce the validation pass: it is long and silent, and its silence
+        # has already been mistaken for a hang.
+        print(f"  validating ({len(val_loader)} batches)...", flush=True)
+        t0 = time.time()
         metrics = model.evaluate(val_loader, device)
+        val_secs = time.time() - t0
+
         monitor = metrics["monitor"]
         extra = "  ".join(
             f"{k}={v:.4f}" for k, v in metrics.items()
             if k != "monitor" and isinstance(v, (int, float))
         )
-        print(f"Epoch {epoch:3d}/{cfg['epochs']}  train_loss={train_loss:.4f}  "
-              f"monitor={monitor:.4f}  lr={optimizer.param_groups[0]['lr']:.3g}  "
-              f"{extra}", flush=True)
-        print(f"  memory: {_memory_report()}", flush=True)
-
-        state = {"epoch": epoch, "model": model.state_dict(),
-                 "optimizer": optimizer.state_dict(),
-                 "monitor": monitor, "metrics": metrics, "config": cfg}
-
-        # Rolling latest.pt every epoch, so an OOM/divergence/preemption costs
-        # at most one epoch rather than everything since the last improvement.
-        # Written to a temp file and renamed so a crash mid-write can't leave a
-        # truncated checkpoint where a resumable one used to be.
-        tmp = checkpoint_dir / "latest.pt.tmp"
-        torch.save(state, tmp)
-        tmp.replace(checkpoint_dir / "latest.pt")
-        print(f"  --> latest.pt saved (epoch {epoch})", flush=True)
+        print(f"  validated in {val_secs:.0f}s  monitor={monitor:.4f}  {extra}",
+              flush=True)
 
         if monitor < best_monitor:
             best_monitor = monitor
-            torch.save(state, checkpoint_dir / "best.pt")
-            print(f"  --> checkpoint saved (monitor={monitor:.4f})", flush=True)
+            _atomic_save({
+                "epoch": epoch, "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "best_monitor": best_monitor,
+                "monitor": monitor, "metrics": metrics,
+                "train_loss": train_loss, "config": cfg,
+            }, checkpoint_dir / "best.pt")
+            print(f"  --> best.pt saved (monitor={monitor:.4f})", flush=True)
+
+        # Refresh latest.pt with the metrics now that validation has run.
+        _snapshot(epoch, completed_epoch=epoch, train_loss=train_loss,
+                  metrics=metrics, monitor=monitor)
 
 
 def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epochs,
-                     clip_max_norm=None, scheduler=None):
+                     clip_max_norm=None, scheduler=None,
+                     on_batch_checkpoint=None, checkpoint_every=None):
     model.train()
     total_loss = 0.0
     n_samples = 0
@@ -304,6 +364,10 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
             print(f"  [mem] epoch {epoch}/{total_epochs}  "
                   f"batch {batch_idx+1}/{n_batches}  {_memory_report()}",
                   flush=True)
+
+        if (on_batch_checkpoint is not None and checkpoint_every
+                and (batch_idx + 1) % checkpoint_every == 0):
+            on_batch_checkpoint(batch_idx + 1)
 
     return total_loss / max(n_samples, 1)
 
