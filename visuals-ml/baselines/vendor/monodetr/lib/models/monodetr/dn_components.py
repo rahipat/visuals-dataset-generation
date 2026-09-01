@@ -268,8 +268,12 @@ def tgt_loss_3dcenter(src_boxes, tgt_boxes, num_tgt):
 
 def tgt_loss_depths(src_depth, tgt_depth, num_tgt):  
 
-    depth_input, depth_log_variance = src_depth[:, 0], src_depth[:, 1] 
-    depth_loss = 1.4142 * torch.exp(-depth_log_variance) * torch.abs(depth_input - tgt_depth) + depth_log_variance  
+    depth_input, depth_log_variance = src_depth[:, 0], src_depth[:, 1]
+    # VISUALS-MOD: same unbounded exp(-log_var) overflow as SetCriterion's
+    # loss_depths in monodetr.py -- clamped identically, or the denoising
+    # branch just reintroduces the NaN the other fix removes.
+    depth_log_variance = torch.clamp(depth_log_variance, min=-10.0, max=10.0)
+    depth_loss = 1.4142 * torch.exp(-depth_log_variance) * torch.abs(depth_input - tgt_depth) + depth_log_variance
     losses = {}
     losses['tgt_loss_depth'] = depth_loss.sum() / num_tgt 
     return losses  

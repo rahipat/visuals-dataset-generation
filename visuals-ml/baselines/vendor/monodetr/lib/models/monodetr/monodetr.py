@@ -397,8 +397,26 @@ class SetCriterion(nn.Module):
         src_depths = outputs['pred_depth'][idx]
         target_depths = torch.cat([t['depth'][i] for t, (_, i) in zip(targets, indices)], dim=0).squeeze()
 
-        depth_input, depth_log_variance = src_depths[:, 0], src_depths[:, 1] 
-        depth_loss = 1.4142 * torch.exp(-depth_log_variance) * torch.abs(depth_input - target_depths) + depth_log_variance  
+        depth_input, depth_log_variance = src_depths[:, 0], src_depths[:, 1]
+        # VISUALS-MOD: depth_log_variance is a raw, unbounded MLP output (see
+        # the depth_reg[:, :, 1:2] channel at ~line 257 -- channel 0 gets a
+        # sigmoid, this one gets nothing), and it is fed straight into
+        # exp(-log_var). The gradient wrt log_var is
+        # -1.4142*exp(-log_var)*|err| + 1, so the more negative it drifts the
+        # harder it is pushed negative: a positive feedback loop that creeps
+        # for epochs and then overflows all at once. exp(-log_var) passes
+        # fp16 range at log_var~-11 and fp32 range at ~-88, after which
+        # inf*|err| -> inf, or inf*0 -> NaN for an exactly-matched box, and
+        # the whole run is NaN from there. This is the root cause of the
+        # repeated "diverges at epoch N" failures; lowering the LR only
+        # changed how long the drift took (epoch 7 -> 2 -> 9), it could never
+        # remove the overflow. Gradient clipping cannot help either: the
+        # blowup happens in the forward pass, before any gradient exists.
+        # Clamping to [-10, 10] bounds exp(-log_var) to ~2.2e4, which stays
+        # finite even multiplied by a large depth error, and is wide enough
+        # to cover any genuinely useful predicted uncertainty.
+        depth_log_variance = torch.clamp(depth_log_variance, min=-10.0, max=10.0)
+        depth_loss = 1.4142 * torch.exp(-depth_log_variance) * torch.abs(depth_input - target_depths) + depth_log_variance
         losses = {}
         losses['loss_depth'] = depth_loss.sum() / num_boxes 
         return losses  

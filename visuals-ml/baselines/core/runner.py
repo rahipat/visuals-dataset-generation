@@ -6,6 +6,7 @@ about a specific baseline beyond the BaselineModel contract (core/interface.py).
 """
 
 import logging
+import math
 import time
 from pathlib import Path
 
@@ -64,9 +65,19 @@ def _build_optimizer(model, cfg):
     return torch.optim.Adam(params, lr=lr)
 
 
-def _build_scheduler(optimizer, cfg, steps_per_epoch):
-    """Per-ITERATION linear warmup (cfg['warmup_iters']) followed by step decay
-    every cfg['lr_drop'] epochs.
+def _build_scheduler(optimizer, cfg, steps_per_epoch, total_epochs=None):
+    """Per-ITERATION linear warmup (cfg['warmup_iters']) followed by decay.
+
+    cfg['lr_schedule'] picks the decay shape:
+      'step'   (default) -- 10x cliff every cfg['lr_drop'] epochs.
+      'cosine'           -- smooth decay from full LR down to
+                            cfg['lr_min_factor'] (default 0.01) across the run.
+
+    Cosine exists because a step cliff only helps if training survives long
+    enough to reach it: MonoDETR diverged at epoch 9 with the drop set at
+    epoch 20, so the LR it actually trained under was constant the whole time.
+    A schedule that decays continuously lowers the LR as the model's state
+    changes, instead of betting everything on one milestone.
 
     Deliberately iteration-granular: this dataset runs ~29k batches per epoch,
     so an epoch-granular warmup is a coarse staircase that jumps most of the
@@ -79,13 +90,28 @@ def _build_scheduler(optimizer, cfg, steps_per_epoch):
     lr_drop = cfg.get("lr_drop")
     gamma = cfg.get("lr_drop_gamma", 0.1)
     start_factor = cfg.get("warmup_start_factor", 0.01)
+    shape = cfg.get("lr_schedule", "step")
+    min_factor = cfg.get("lr_min_factor", 0.01)
 
-    if not warmup_iters and lr_drop is None:
+    total_steps = (total_epochs or 0) * steps_per_epoch
+    if shape == "cosine" and total_steps <= warmup_iters:
+        logger.warning("lr_schedule='cosine' needs total steps > warmup_iters; "
+                       "falling back to a flat post-warmup LR.")
+        shape = "step"
+        lr_drop = None
+
+    if not warmup_iters and lr_drop is None and shape != "cosine":
         return None
 
     def factor(step):
         if warmup_iters and step < warmup_iters:
             return start_factor + (1.0 - start_factor) * (step / warmup_iters)
+        if shape == "cosine":
+            progress = ((step - warmup_iters)
+                        / max(1, total_steps - warmup_iters))
+            progress = min(1.0, max(0.0, progress))
+            return min_factor + (1.0 - min_factor) * 0.5 * (
+                1.0 + math.cos(math.pi * progress))
         if lr_drop and steps_per_epoch:
             return gamma ** ((step // steps_per_epoch) // lr_drop)
         return 1.0
@@ -164,7 +190,7 @@ def train(model, cfg, device, resume=None):
     model.to(device)
     optimizer = _build_optimizer(model, cfg)
     steps_per_epoch = len(train_loader)
-    scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch)
+    scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch, cfg["epochs"])
     use_cuda = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
     clip_max_norm = cfg.get("clip_max_norm")  # None disables clipping
