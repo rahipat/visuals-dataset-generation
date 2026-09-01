@@ -124,6 +124,18 @@ class MonoDETRBaseline(BaselineModel):
         for k in ("loss_ce", "loss_bbox", "loss_center", "loss_depth", "loss_dim", "loss_angle"):
             if k in loss_dict:
                 logs[k] = float(loss_dict[k])
+
+        # Watch the aleatoric depth head's log-variance drift. This is the raw,
+        # pre-clamp network output (SetCriterion.loss_depths clamps its own
+        # copy), and it is the quantity suspected of creeping negative over
+        # epochs until exp(-log_var) overflows. Logging min/mean turns "it
+        # diverges around epoch 9" into something observable: if the run is
+        # healthy this sits in a stable band, and if the drift theory holds it
+        # walks steadily toward the -10 clamp floor as the epochs pass.
+        with torch.no_grad():
+            log_var = outputs["pred_depth"][..., 1]
+            logs["dlogvar_min"] = float(log_var.min())
+            logs["dlogvar_mean"] = float(log_var.mean())
         return loss, logs
 
     # ---- eval ----------------------------------------------------------------

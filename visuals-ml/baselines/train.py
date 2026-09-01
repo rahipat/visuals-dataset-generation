@@ -25,6 +25,21 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+
+    # cfg['seed'] previously only seeded the train/val split (a local
+    # random.Random in core/utils.split_dataset); torch's global RNG was left
+    # unseeded, so weight init AND DataLoader shuffle order differed on every
+    # run. That makes a divergence impossible to reproduce or bisect -- two
+    # runs can't be compared when neither the starting weights nor the batch
+    # order match. Seed torch here, before build_model() initialises weights.
+    seed = cfg.get("seed")
+    if seed is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        print(f"Seeded torch RNG with {seed} (weight init + shuffle order now "
+              "reproducible across runs)")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}  |  model: {cfg['model']}")
 
