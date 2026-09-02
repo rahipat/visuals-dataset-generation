@@ -8,6 +8,7 @@ about a specific baseline beyond the BaselineModel contract (core/interface.py).
 import logging
 import math
 import time
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -18,6 +19,11 @@ logger = logging.getLogger(__name__)
 LOG_INTERVAL = 50
 MEMORY_LOG_INTERVAL = 1000
 MAX_CONSECUTIVE_NONFINITE_LOSS = 5
+# Every batch is recorded here, not just logged ones: when a run goes
+# non-finite the interesting window is the handful of batches immediately
+# before it, and LOG_INTERVAL sampling is far too coarse to show whether a
+# quantity ramped or jumped.
+RECENT_HISTORY = 30
 
 
 def _maybe_cap(dataset, cfg):
@@ -117,6 +123,38 @@ def _build_scheduler(optimizer, cfg, steps_per_epoch, total_epochs=None):
         return 1.0
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
+def _nonfinite_params(model, limit=8):
+    """Names of parameters containing NaN/Inf.
+
+    This is the decisive test when a loss goes non-finite. If the weights are
+    still finite, the forward pass turned healthy weights into NaN for this
+    particular batch -- look at the batch/inputs. If the weights are already
+    non-finite, the corruption happened during an EARLIER optimizer step and
+    the non-finite loss is just the first place it became visible; the real
+    event is upstream and the batch here is innocent."""
+    bad = []
+    for name, p in model.named_parameters():
+        if not torch.isfinite(p).all():
+            bad.append(name)
+            if len(bad) >= limit:
+                bad.append("...")
+                break
+    return bad
+
+
+def _dump_recent(recent, epoch, n_batches):
+    """Replay the per-batch history leading into a failure, at full
+    resolution, so a slow ramp is distinguishable from a single-step jump."""
+    if not recent:
+        return
+    print(f"\n  ==== per-batch history into the failure "
+          f"(epoch {epoch}, last {len(recent)} batches) ====", flush=True)
+    for batch, loss_s, scale, stats in recent:
+        print(f"    batch {batch:>6}/{n_batches}  loss={loss_s:>12}  "
+              f"amp_scale={scale:<12.6g} {stats}", flush=True)
+    print("  ==== end history ====\n", flush=True)
 
 
 def _atomic_save(state, path):
@@ -317,11 +355,24 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
     n_batches = len(loader)
     use_cuda = device.type == "cuda"
     consecutive_nonfinite = 0
+    recent = deque(maxlen=RECENT_HISTORY)
+    dumped_history = False
 
     for batch_idx, batch in enumerate(loader):
         optimizer.zero_grad()
         with torch.autocast(device_type=device.type, enabled=use_cuda):
             loss, logs = model.training_step(batch, device)
+
+        # Record EVERY batch (the logs values are already-synced floats, so
+        # this costs nothing beyond the deque) -- the window right before a
+        # failure is exactly what LOG_INTERVAL sampling throws away.
+        stats = "  ".join(
+            f"{k}={v:.4g}" for k, v in logs.items()
+            if k != "batch_size" and isinstance(v, (int, float))
+        )
+        recent.append((batch_idx + 1, f"{loss.item():.6g}",
+                       scaler.get_scale() if scaler.is_enabled() else float("nan"),
+                       stats))
 
         if not torch.isfinite(loss):
             consecutive_nonfinite += 1
@@ -335,6 +386,25 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
                 epoch, total_epochs, batch_idx + 1, n_batches, loss.item(),
                 extra, consecutive_nonfinite, MAX_CONSECUTIVE_NONFINITE_LOSS,
             )
+            if not dumped_history:
+                dumped_history = True
+                _dump_recent(recent, epoch, n_batches)
+                # Are the weights themselves already corrupt? This decides
+                # whether the culprit is this batch or an earlier update.
+                bad = _nonfinite_params(model)
+                if bad:
+                    logger.error(
+                        "MODEL WEIGHTS are already non-finite (%d shown): %s -- "
+                        "corruption predates this batch; the forward pass had no "
+                        "chance of producing a finite loss. Look for the earlier "
+                        "optimizer step that admitted it, not at this batch.",
+                        len(bad), ", ".join(bad))
+                else:
+                    logger.error(
+                        "Model weights are all FINITE -- this batch's forward pass "
+                        "produced NaN/Inf from healthy weights. The trigger is in "
+                        "this batch's inputs or activations, not accumulated "
+                        "weight corruption.")
             if consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE_LOSS:
                 raise RuntimeError(
                     f"Training diverged: loss was non-finite for "
