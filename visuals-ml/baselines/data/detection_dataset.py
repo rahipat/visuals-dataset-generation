@@ -84,6 +84,26 @@ class DetectionDataset(Dataset):
     def __getitem__(self, idx):
         def build(i):
             r = self.records[i]
+            # Validate the image-level geometry BEFORE opening the file. The
+            # per-object loop below already screens box_2d/loc, but calib and
+            # image_size were used unchecked -- and they are far more
+            # dangerous, because they are not per-object: calib feeds
+            # depth_geo = size3d / box2d_height * calibs[:, 0, 0] inside the
+            # model, so one non-finite intrinsic turns pred_depth into NaN for
+            # the WHOLE image and every loss component dies at once, with
+            # healthy weights. A zero/NaN image_size does the same via the
+            # res/native scale factors. Raising OSError routes this through
+            # the same skip-and-blacklist path as a corrupt file.
+            nw, nh = r["image_size"]
+            intr = r["intrinsic"]
+            vals = [nw, nh] + [intr.get(k) for k in ("f_u", "f_v", "c_u", "c_v")]
+            if any(v is None or not math.isfinite(v) for v in vals):
+                raise OSError(f"record {i}: non-finite image_size/intrinsic "
+                              f"(image_size={r['image_size']}, intrinsic={intr})")
+            if nw <= 0 or nh <= 0:
+                raise OSError(f"record {i}: non-positive image_size "
+                              f"{r['image_size']}")
+
             img = Image.open(to_posix(r["image_path"]))
             img.load()  # force decode now so truncated/empty files raise here
             return r, img.convert("RGB")

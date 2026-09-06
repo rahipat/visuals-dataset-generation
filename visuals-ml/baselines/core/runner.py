@@ -7,6 +7,7 @@ about a specific baseline beyond the BaselineModel contract (core/interface.py).
 
 import logging
 import math
+import random
 import time
 from collections import deque
 from pathlib import Path
@@ -123,6 +124,65 @@ def _build_scheduler(optimizer, cfg, steps_per_epoch, total_epochs=None):
         return 1.0
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
+def _rng_state():
+    """Capture every RNG that affects a training run. Without these, a resume
+    replays the epoch with a DIFFERENT shuffle order and different dropout
+    masks than the run being resumed -- so 'resume and see if it happens
+    again' silently tests a different data sequence each time."""
+    state = {"python": random.getstate(), "torch": torch.get_rng_state()}
+    try:
+        import numpy as _np
+        state["numpy"] = _np.random.get_state()
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state):
+    if not state:
+        return False
+    try:
+        random.setstate(state["python"])
+        torch.set_rng_state(state["torch"].cpu() if hasattr(state["torch"], "cpu")
+                            else state["torch"])
+        if "numpy" in state:
+            import numpy as _np
+            _np.random.set_state(state["numpy"])
+        if "cuda" in state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["cuda"])
+        return True
+    except Exception as e:
+        logger.warning("Could not restore RNG state (%s); shuffle order will "
+                       "differ from the interrupted run.", e)
+        return False
+
+
+def _nonfinite_optimizer_state(optimizer, limit=8):
+    """Non-finite entries in the optimizer's own state (Adam's exp_avg /
+    exp_avg_sq).
+
+    Worth checking separately from the weights: a checkpoint can hold perfectly
+    finite parameters alongside a poisoned second-moment buffer, and nothing
+    shows up until the first step that actually applies -- at which point
+    exp_avg/sqrt(exp_avg_sq) can be inf/inf = NaN and the weights die in one
+    update, long after the checkpoint 'looked' clean."""
+    bad = []
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            st = optimizer.state.get(p)
+            if not st:
+                continue
+            for key, val in st.items():
+                if torch.is_tensor(val) and val.is_floating_point() \
+                        and not torch.isfinite(val).all():
+                    bad.append(f"{key}{tuple(val.shape)}")
+                    if len(bad) >= limit:
+                        return bad + ["..."]
+    return bad
 
 
 def _nonfinite_params(model, limit=8):
@@ -245,6 +305,40 @@ def train(model, cfg, device, resume=None):
             optimizer.load_state_dict(ckpt["optimizer"])
         else:
             print("  (no optimizer state in checkpoint -- Adam moments restart from scratch)")
+
+        if "scaler" in ckpt:
+            scaler.load_state_dict(ckpt["scaler"])
+            print(f"  restored GradScaler (scale={scaler.get_scale():g})")
+        else:
+            print(f"  WARNING: checkpoint has no GradScaler state -- AMP restarts "
+                  f"at the default scale ({scaler.get_scale():g}), not whatever "
+                  f"the interrupted run had settled to. Expect skipped steps "
+                  f"and halving until it re-converges.")
+
+        if _restore_rng_state(ckpt.get("rng")):
+            print("  restored RNG state (shuffle order continues the original run)")
+        else:
+            print("  WARNING: checkpoint has no RNG state -- this epoch replays "
+                  "with a DIFFERENT shuffle order than the run being resumed, "
+                  "so a data-dependent failure will land at a different batch.")
+
+        # Audit what was actually loaded. A checkpoint can carry finite weights
+        # alongside poisoned optimizer moments; that stays invisible until the
+        # first applied step, which is exactly the 'healthy batch 1, dead batch
+        # 2' shape.
+        bad_p = _nonfinite_params(model)
+        bad_o = _nonfinite_optimizer_state(optimizer)
+        if bad_p:
+            logger.error("RESUMED CHECKPOINT HAS NON-FINITE WEIGHTS: %s -- this "
+                         "checkpoint is already dead; resume from an earlier one.",
+                         ", ".join(bad_p))
+        if bad_o:
+            logger.error("RESUMED CHECKPOINT HAS NON-FINITE OPTIMIZER STATE: %s -- "
+                         "weights may look fine, but the first applied step will "
+                         "propagate NaN into them.", ", ".join(bad_o))
+        if not bad_p and not bad_o:
+            print("  checkpoint health: weights and optimizer state all finite")
+
         start_epoch = ckpt["epoch"] + 1
         # Prefer the running best over this checkpoint's own monitor: latest.pt
         # is whatever ran last, not necessarily the best, so keying off its
@@ -282,6 +376,11 @@ def train(model, cfg, device, resume=None):
             "epoch": completed_epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            # Without the scaler state a resume restarts AMP at the default
+            # init_scale (65536) regardless of what the run had settled to,
+            # so the first few batches back can overflow and skip steps.
+            "scaler": scaler.state_dict(),
+            "rng": _rng_state(),
             "best_monitor": best_monitor,   # so resume keeps the running best
             "monitor": monitor,
             "metrics": metrics,
@@ -335,6 +434,7 @@ def train(model, cfg, device, resume=None):
             _atomic_save({
                 "epoch": epoch, "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(), "rng": _rng_state(),
                 "best_monitor": best_monitor,
                 "monitor": monitor, "metrics": metrics,
                 "train_loss": train_loss, "config": cfg,
