@@ -136,6 +136,34 @@ class MonoDETRBaseline(BaselineModel):
             log_var = outputs["pred_depth"][..., 1]
             logs["dlogvar_min"] = float(log_var.min())
             logs["dlogvar_mean"] = float(log_var.mean())
+
+            # Autopsy, only when the loss has already gone bad -- costs one
+            # scalar isfinite() on the happy path. This pins down WHERE the
+            # NaN first appears, which theory alone has not been able to
+            # settle: bad inputs, a bad forward, or only the loss reduction.
+            if not torch.isfinite(loss):
+                def _bad(name, t):
+                    return [] if (not torch.is_tensor(t)
+                                  or not t.is_floating_point()
+                                  or torch.isfinite(t).all()) else [name]
+
+                bad_in = _bad("images", images) + _bad("calibs", calibs)
+                bad_out = []
+                for k, v in outputs.items():
+                    if torch.is_tensor(v):
+                        bad_out += _bad(k, v)
+                bad_tgt = []
+                for k in ("depth", "size_3d", "boxes_3d", "heading_res"):
+                    for bi, t in enumerate(targets_list):
+                        bad_tgt += _bad(f"{k}[{bi}]", t.get(k))
+                bad_loss = [k for k, v in loss_dict.items()
+                            if torch.is_tensor(v) and not torch.isfinite(v).all()]
+
+                logs["nf_inputs"] = ",".join(bad_in) or "none"
+                logs["nf_outputs"] = ",".join(sorted(set(bad_out))) or "none"
+                logs["nf_targets"] = ",".join(bad_tgt[:6]) or "none"
+                logs["nf_losses"] = ",".join(sorted(bad_loss)) or "none"
+                logs["n_targets"] = sum(len(t["labels"]) for t in targets_list)
         return loss, logs
 
     # ---- eval ----------------------------------------------------------------

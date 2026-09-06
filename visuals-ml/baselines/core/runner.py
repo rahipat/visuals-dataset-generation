@@ -126,6 +126,24 @@ def _build_scheduler(optimizer, cfg, steps_per_epoch, total_epochs=None):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
+def _param_fingerprint(model):
+    """Cheap GPU-side fingerprint of all weights. Kept as a tensor so it costs
+    no host sync per batch; only compared (and synced) when something fails.
+
+    Its job is to answer one question that theory alone cannot: did the last
+    optimizer step ACTUALLY apply? GradScaler is supposed to skip the step
+    whenever it finds inf/NaN gradients, so a halved scale should imply
+    unchanged weights. If the fingerprint moves across a batch where the scale
+    was backed off, that assumption is false and the search moves to the
+    optimizer/scaler interaction rather than the data."""
+    total = None
+    for p in model.parameters():
+        if p.is_floating_point():
+            s = p.detach().sum()
+            total = s if total is None else total + s
+    return total
+
+
 def _rng_state():
     """Capture every RNG that affects a training run. Without these, a resume
     replays the epoch with a DIFFERENT shuffle order and different dropout
@@ -457,9 +475,13 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
     consecutive_nonfinite = 0
     recent = deque(maxlen=RECENT_HISTORY)
     dumped_history = False
+    prev_fp = None          # weight fingerprint at the END of the previous batch
+    prev_scale = None
 
     for batch_idx, batch in enumerate(loader):
         optimizer.zero_grad()
+        fp_before = _param_fingerprint(model)
+        scale_before = scaler.get_scale() if scaler.is_enabled() else float("nan")
         with torch.autocast(device_type=device.type, enabled=use_cuda):
             loss, logs = model.training_step(batch, device)
 
@@ -486,9 +508,40 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
                 epoch, total_epochs, batch_idx + 1, n_batches, loss.item(),
                 extra, consecutive_nonfinite, MAX_CONSECUTIVE_NONFINITE_LOSS,
             )
+            # Non-numeric diagnostics (the model's own autopsy of where the
+            # NaN first appears) are dropped by the float formatter above, so
+            # surface them explicitly.
+            autopsy = "  ".join(f"{k}={v}" for k, v in logs.items()
+                                if isinstance(v, str))
+            if autopsy:
+                logger.error("  first-NaN localisation: %s", autopsy)
             if not dumped_history:
                 dumped_history = True
                 _dump_recent(recent, epoch, n_batches)
+
+                # Did the PREVIOUS batch's optimizer step actually apply?
+                # GradScaler backing the scale off is supposed to mean "step
+                # skipped, weights untouched". If the weights moved anyway,
+                # that assumption is wrong and this is not a data problem.
+                if prev_fp is not None:
+                    delta = (fp_before - prev_fp).abs().item()
+                    backed_off = (prev_scale is not None
+                                  and scale_before < prev_scale)
+                    logger.error(
+                        "weight fingerprint changed by %.6g since the previous "
+                        "batch; AMP scale %s (%g -> %g). Expected: change==0 "
+                        "when the scale backs off (step skipped). %s",
+                        delta,
+                        "BACKED OFF" if backed_off else "steady",
+                        prev_scale if prev_scale is not None else float("nan"),
+                        scale_before,
+                        "CONTRADICTION: weights moved on a skipped step -- "
+                        "investigate the optimizer/GradScaler interaction, not "
+                        "the data." if (backed_off and delta > 0) else
+                        "Consistent with GradScaler skipping the step."
+                        if backed_off else
+                        "Step applied normally (scale steady).",
+                    )
                 # Are the weights themselves already corrupt? This decides
                 # whether the culprit is this batch or an earlier update.
                 bad = _nonfinite_params(model)
@@ -541,6 +594,11 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
         scaler.update()
         if scheduler is not None:
             scheduler.step()
+
+        # Carry this batch's pre-step fingerprint/scale forward, so the next
+        # batch can tell whether the step it just ran actually moved the
+        # weights (see the autopsy in the non-finite branch above).
+        prev_fp, prev_scale = fp_before, scale_before
 
         bs = logs.get("batch_size", 1)
         total_loss += loss.item() * bs
