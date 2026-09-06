@@ -126,6 +126,60 @@ def _build_scheduler(optimizer, cfg, steps_per_epoch, total_epochs=None):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
+def _locate_forward_nan(model, batch, device, use_cuda, limit=6):
+    """Re-run ONE batch with forward hooks on every submodule to find where a
+    non-finite value first enters the forward pass.
+
+    Only called after a batch has already failed, so the cost (a device sync
+    per module) is paid once, never during healthy training. Hooks fire in
+    execution order, so the first module reporting a non-finite OUTPUT while
+    its INPUTS were still finite is the origin -- everything downstream of it
+    is just propagation. A module with non-finite inputs is listed too, but
+    marked as a victim rather than the cause."""
+    found = []
+    handles = []
+
+    def _tensors(x):
+        if torch.is_tensor(x):
+            return [x]
+        if isinstance(x, (list, tuple)):
+            return [t for t in x if torch.is_tensor(t)]
+        if isinstance(x, dict):
+            return [t for t in x.values() if torch.is_tensor(t)]
+        return []
+
+    def _nonfinite(ts):
+        return any(t.is_floating_point() and not torch.isfinite(t).all() for t in ts)
+
+    def make_hook(name):
+        def hook(mod, inp, out):
+            if len(found) >= limit:
+                return
+            out_bad = _nonfinite(_tensors(out))
+            if not out_bad:
+                return
+            in_bad = _nonfinite(_tensors(inp))
+            found.append({
+                "module": name or "<root>",
+                "type": type(mod).__name__,
+                "inputs_finite": not in_bad,
+            })
+        return hook
+
+    for name, mod in model.named_modules():
+        handles.append(mod.register_forward_hook(make_hook(name)))
+    try:
+        with torch.no_grad():
+            with torch.autocast(device_type=device.type, enabled=use_cuda):
+                model.training_step(batch, device)
+    except Exception as e:
+        logger.warning("forward-NaN localisation re-run failed: %s", e)
+    finally:
+        for h in handles:
+            h.remove()
+    return found
+
+
 def _param_fingerprint(model):
     """Cheap GPU-side fingerprint of all weights. Kept as a tensor so it costs
     no host sync per batch; only compared (and synced) when something fails.
@@ -544,6 +598,24 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
                     )
                 # Are the weights themselves already corrupt? This decides
                 # whether the culprit is this batch or an earlier update.
+                # If the forward itself died, re-run this exact batch with
+                # per-module hooks to find where the NaN enters. Only reached
+                # once, on the first failure.
+                origin = _locate_forward_nan(model, batch, device, use_cuda)
+                if origin:
+                    logger.error("  forward-NaN origin (execution order):")
+                    for i, m in enumerate(origin):
+                        role = ("ORIGIN (inputs were finite)" if m["inputs_finite"]
+                                else "downstream victim (inputs already bad)")
+                        logger.error("    %d. %s [%s] -- %s",
+                                     i + 1, m["module"], m["type"], role)
+                else:
+                    logger.error("  no module produced a non-finite output on "
+                                 "re-run -- the failure is not reproducible from "
+                                 "this batch's inputs alone (points at state: "
+                                 "weights, optimizer, or AMP), or it lives in a "
+                                 "functional op outside any nn.Module.")
+
                 bad = _nonfinite_params(model)
                 if bad:
                     logger.error(
