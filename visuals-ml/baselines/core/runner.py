@@ -133,20 +133,57 @@ def _code_version():
     always 'which commit produced this log?' -- and answering it has required
     cross-referencing the repo by hand. A submitted job can easily predate the
     commit that added the instrumentation being looked for, and nothing in the
-    output said so. Now it does."""
-    import subprocess
-    here = str(Path(__file__).resolve().parent)
+    output said so. Now it does.
+
+    Reads .git directly rather than shelling out to git: the training container
+    has no git binary, so the subprocess version reported
+    'unknown (FileNotFoundError)' on exactly the runs where knowing the commit
+    mattered most.
+    """
     try:
-        sha = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
-                             capture_output=True, text=True, timeout=5)
-        if sha.returncode != 0:
-            return "unknown (not a git checkout)"
-        out = sha.stdout.strip()
-        dirty = subprocess.run(["git", "-C", here, "status", "--porcelain"],
-                               capture_output=True, text=True, timeout=5)
-        if dirty.returncode == 0 and dirty.stdout.strip():
-            out += " +uncommitted"
-        return out
+        here = Path(__file__).resolve().parent
+        git_dir = None
+        for d in [here, *here.parents]:
+            cand = d / ".git"
+            if cand.exists():
+                git_dir = cand
+                break
+        if git_dir is None:
+            return "unknown (no .git found)"
+
+        # A worktree's .git is a file containing 'gitdir: <path>'.
+        if git_dir.is_file():
+            txt = git_dir.read_text(encoding="utf-8").strip()
+            if not txt.startswith("gitdir:"):
+                return "unknown (unreadable .git file)"
+            git_dir = Path(txt.split(":", 1)[1].strip())
+
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head[:9]  # detached HEAD
+
+        # In a linked worktree, HEAD is worktree-local but refs live in the
+        # main repository's git dir, named by 'commondir'.
+        common = git_dir
+        commondir = git_dir / "commondir"
+        if commondir.exists():
+            common = (git_dir / commondir.read_text(encoding="utf-8").strip()).resolve()
+
+        ref = head.split(":", 1)[1].strip()
+        for base in (git_dir, common):
+            loose = base / ref
+            if loose.exists():
+                return loose.read_text(encoding="utf-8").strip()[:9]
+
+        packed = common / "packed-refs"
+        if packed.exists():
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                if line.startswith(("#", "^")):
+                    continue
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return parts[0][:9]
+        return f"unknown (ref {ref} unresolved)"
     except Exception as e:
         return f"unknown ({type(e).__name__})"
 
@@ -605,8 +642,17 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
                                 if isinstance(v, str))
             if autopsy:
                 logger.error("  first-NaN localisation: %s", autopsy)
-            if not dumped_history:
+            # Dump the deep diagnostics on the first non-finite batch AND
+            # again on the batch that actually aborts the run. Previously this
+            # was first-only: a single transient non-finite batch that later
+            # recovered would consume the one dump, and the fatal failure
+            # thousands of batches later printed only the summary -- which is
+            # precisely the "hooks say active but never trace" symptom.
+            fatal = consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE_LOSS
+            if not dumped_history or fatal:
                 dumped_history = True
+                logger.error("  deep diagnostics (%s):",
+                             "FATAL batch" if fatal else "first non-finite batch")
                 _dump_recent(recent, epoch, n_batches)
 
                 # Did the PREVIOUS batch's optimizer step actually apply?
