@@ -759,10 +759,18 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
         n_samples += bs
 
         if (batch_idx + 1) % LOG_INTERVAL == 0 or (batch_idx + 1) == n_batches:
-            extra = "  ".join(f"{k}={v:.4f}" for k, v in logs.items() if k != "batch_size")
+            # isinstance guard: logs carries string diagnostics on failing
+            # batches, and ':.4f' on a string raises.
+            extra = "  ".join(f"{k}={v:.4f}" for k, v in logs.items()
+                              if k != "batch_size" and isinstance(v, (int, float)))
+            # amp_scale on the normal line, not just in the failure dump:
+            # without it there is no way to see what the GradScaler settles
+            # to during healthy training, which is the only sound basis for
+            # deciding whether to seed it on a resume.
             print(f"  [train] epoch {epoch}/{total_epochs}  "
                   f"batch {batch_idx+1}/{n_batches}  loss={loss.item():.4f}  "
-                  f"lr={optimizer.param_groups[0]['lr']:.3g}  {extra}",
+                  f"lr={optimizer.param_groups[0]['lr']:.3g}  "
+                  f"amp_scale={scale_before:g}  {extra}",
                   flush=True)
 
         # Periodic memory trace: a steadily climbing host_total/workers figure
