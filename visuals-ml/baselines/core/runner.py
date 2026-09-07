@@ -126,6 +126,40 @@ def _build_scheduler(optimizer, cfg, steps_per_epoch, total_epochs=None):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
+def _code_version():
+    """Git SHA of the code actually running, best-effort.
+
+    When an expected diagnostic is missing from a log, the first question is
+    always 'which commit produced this log?' -- and answering it has required
+    cross-referencing the repo by hand. A submitted job can easily predate the
+    commit that added the instrumentation being looked for, and nothing in the
+    output said so. Now it does."""
+    import subprocess
+    here = str(Path(__file__).resolve().parent)
+    try:
+        sha = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        if sha.returncode != 0:
+            return "unknown (not a git checkout)"
+        out = sha.stdout.strip()
+        dirty = subprocess.run(["git", "-C", here, "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=5)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            out += " +uncommitted"
+        return out
+    except Exception as e:
+        return f"unknown ({type(e).__name__})"
+
+
+# Diagnostics this version of the runner can emit on a failure. Printed at
+# startup so a log states its own capabilities rather than leaving their
+# absence ambiguous.
+DIAGNOSTICS = (
+    "per-batch-history", "weight-fingerprint", "forward-module-hooks",
+    "checkpoint-audit", "scaler+rng-restore",
+)
+
+
 def _locate_forward_nan(model, batch, device, use_cuda, limit=6):
     """Re-run ONE batch with forward hooks on every submodule to find where a
     non-finite value first enters the forward pass.
@@ -433,6 +467,8 @@ def train(model, cfg, device, resume=None):
               f"{(start_epoch - 1) * steps_per_epoch}  "
               f"lr={optimizer.param_groups[0]['lr']:.3g}")
 
+    print(f"Runner code version: {_code_version()}", flush=True)
+    print(f"Failure diagnostics active: {', '.join(DIAGNOSTICS)}", flush=True)
     print(f"Startup memory: {_memory_report()}", flush=True)
 
     # Epochs here are enormous (PositionNet: ~170k batches, many hours), so
