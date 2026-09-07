@@ -197,7 +197,7 @@ DIAGNOSTICS = (
 )
 
 
-def _locate_forward_nan(model, batch, device, use_cuda, limit=6):
+def _locate_forward_nan(model, batch, device, use_cuda, limit=6, rng_state=None):
     """Re-run ONE batch with forward hooks on every submodule to find where a
     non-finite value first enters the forward pass.
 
@@ -239,6 +239,11 @@ def _locate_forward_nan(model, batch, device, use_cuda, limit=6):
 
     for name, mod in model.named_modules():
         handles.append(mod.register_forward_hook(make_hook(name)))
+    # Replay the RNG the failing forward actually used. The model is in
+    # train() mode, so dropout is live: without this the re-run draws DIFFERENT
+    # masks and a mask-dependent failure simply will not reproduce -- which
+    # would look like "non-deterministic" when it is only "not replayed".
+    replayed = _restore_rng_state(rng_state) if rng_state else False
     try:
         with torch.no_grad():
             with torch.autocast(device_type=device.type, enabled=use_cuda):
@@ -248,6 +253,10 @@ def _locate_forward_nan(model, batch, device, use_cuda, limit=6):
     finally:
         for h in handles:
             h.remove()
+    if not found and not replayed:
+        logger.error("  (re-run did NOT replay the original RNG state, so a "
+                     "dropout-dependent failure would not reproduce -- do not "
+                     "read a clean re-run as proof of non-determinism)")
     return found
 
 
@@ -432,7 +441,16 @@ def train(model, cfg, device, resume=None):
     optimizer = _build_optimizer(model, cfg)
     steps_per_epoch = len(train_loader)
     scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch, cfg["epochs"])
-    use_cuda = device.type == "cuda"
+    # cfg['amp'] (default True) gates mixed precision. Worth turning OFF for
+    # losses with a large gradient dynamic range: MonoDETR's aleatoric depth
+    # term has d(loss)/d(log_var) = 1.4142*exp(-log_var)*|err|, which exceeds
+    # fp16's 65504 ceiling even at scale 1 for errors of a couple of metres.
+    # GradScaler responds by halving forever -- the scale collapses toward 0,
+    # every step is skipped, and training silently stops making progress while
+    # still burning GPU hours.
+    use_cuda = device.type == "cuda" and cfg.get("amp", True)
+    if device.type == "cuda" and not cfg.get("amp", True):
+        print("AMP DISABLED by config (amp: false) -- training in fp32")
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
     clip_max_norm = cfg.get("clip_max_norm")  # None disables clipping
 
@@ -547,6 +565,7 @@ def train(model, cfg, device, resume=None):
         train_loss = _run_train_epoch(
             model, train_loader, optimizer, scaler, device, epoch, cfg["epochs"],
             clip_max_norm, scheduler, on_batch_ckpt, ckpt_every,
+            cfg.get("capture_rng_per_batch", True),
         )
 
         # Save BEFORE validating. Validation is a full pass over the val split
@@ -593,12 +612,16 @@ def train(model, cfg, device, resume=None):
 
 def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epochs,
                      clip_max_norm=None, scheduler=None,
-                     on_batch_checkpoint=None, checkpoint_every=None):
+                     on_batch_checkpoint=None, checkpoint_every=None,
+                     capture_rng_per_batch=True):
     model.train()
     total_loss = 0.0
     n_samples = 0
     n_batches = len(loader)
-    use_cuda = device.type == "cuda"
+    # Follow the scaler rather than re-deriving from the device, so
+    # cfg['amp']=false actually disables autocast in the training loop too.
+    use_cuda = scaler.is_enabled()
+    capture_rng = capture_rng_per_batch
     consecutive_nonfinite = 0
     recent = deque(maxlen=RECENT_HISTORY)
     dumped_history = False
@@ -609,6 +632,10 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
         optimizer.zero_grad()
         fp_before = _param_fingerprint(model)
         scale_before = scaler.get_scale() if scaler.is_enabled() else float("nan")
+        # Snapshot the RNG so a failing batch can be replayed exactly.
+        # cfg['capture_rng_per_batch']=false disables it if the per-batch cost
+        # ever matters more than reproducing a failure.
+        rng_before = _rng_state() if capture_rng else None
         with torch.autocast(device_type=device.type, enabled=use_cuda):
             loss, logs = model.training_step(batch, device)
 
@@ -683,7 +710,8 @@ def _run_train_epoch(model, loader, optimizer, scaler, device, epoch, total_epoc
                 # If the forward itself died, re-run this exact batch with
                 # per-module hooks to find where the NaN enters. Only reached
                 # once, on the first failure.
-                origin = _locate_forward_nan(model, batch, device, use_cuda)
+                origin = _locate_forward_nan(model, batch, device, use_cuda,
+                                             rng_state=rng_before)
                 if origin:
                     logger.error("  forward-NaN origin (execution order):")
                     for i, m in enumerate(origin):

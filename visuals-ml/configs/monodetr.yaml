@@ -48,3 +48,17 @@ lr_drop_gamma: 0.1      # back to 'step' needs no re-tuning
 # whole epoch.
 checkpoint_every_n_batches: 5000
 checkpoint_dir: baselines/checkpoints/monodetr
+
+# --- mixed precision -----------------------------------------------------
+# DISABLED deliberately. MonoDETR's aleatoric depth loss has
+#     d(loss)/d(log_var) = 1.4142 * exp(-log_var) * |err|
+# which exceeds fp16's 65504 ceiling even at GradScaler scale 1 for depth
+# errors of more than ~2m. Observed consequence: the scale collapsed
+# 65536 -> 8 -> 4 -> 2 within 150 batches, meaning nearly every step was
+# being SKIPPED -- the model had effectively stopped training while still
+# consuming GPU hours, well before any NaN appeared. amp_scale=2 is exactly
+# the largest power of two keeping 1.4142*exp(10) inside fp16, so this is
+# arithmetic, not a hunch.
+# Cost: fp32 is slower per step. Benefit: steps actually apply.
+# Set back to true to re-enable once the depth loss is reformulated.
+amp: false
