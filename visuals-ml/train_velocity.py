@@ -102,7 +102,7 @@ def main():
     start_epoch = 1
     best_val_loss = float("inf")
     if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         start_epoch = ckpt["epoch"] + 1
         best_val_loss = ckpt["val_loss"]

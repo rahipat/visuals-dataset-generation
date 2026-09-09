@@ -47,7 +47,7 @@ from model.position_net import PositionNet
 def _load_positionnet(checkpoint: str, device) -> PositionNet:
     """Load a PositionNet core from either a harness checkpoint (keys prefixed
     'core.') or a bare PositionNet state dict."""
-    ckpt = torch.load(checkpoint, map_location=device)
+    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
     state = ckpt.get("model", ckpt) if isinstance(ckpt, dict) else ckpt
     core = {}
     for k, v in state.items():

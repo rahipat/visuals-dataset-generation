@@ -110,7 +110,7 @@ def main():
 
     import torch
 
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     current = ckpt.get("epoch")
     if current is None:
         sys.exit("checkpoint has no 'epoch' key -- is this a training checkpoint?")

@@ -67,7 +67,7 @@ def main():
     train_set, val_set = _maybe_cap(train_set, cfg), _maybe_cap(val_set, cfg)
     print(f"Train: {len(train_set)}  Val: {len(val_set)}")
     model.to(device)
-    ckpt = torch.load(checkpoint, map_location=device)
+    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
 
     train_loader = _make_loader(train_set, model, cfg, shuffle=False, device=device)

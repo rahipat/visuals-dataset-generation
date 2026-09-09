@@ -460,7 +460,16 @@ def train(model, cfg, device, resume=None):
     start_epoch = 1
     best_monitor = float("inf")
     if resume:
-        ckpt = torch.load(resume, map_location=device)
+        # weights_only=False: torch 2.6 flipped this default to True, which
+        # rejects anything outside an allow-list of tensor types. Our
+        # checkpoints carry the RNG snapshot (_rng_state includes
+        # numpy.random.get_state(), i.e. numpy arrays) plus metrics and the
+        # config, so a weights-only load raises UnpicklingError on
+        # numpy._core.multiarray._reconstruct. These are checkpoints this
+        # runner wrote itself, not untrusted input, so full unpickling is
+        # appropriate. Never point this at a checkpoint from an untrusted
+        # source.
+        ckpt = torch.load(resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
@@ -822,7 +831,9 @@ def evaluate(model, cfg, device, checkpoint):
     val_loader = _make_loader(val_set, model, cfg, shuffle=False, device=device)
 
     model.to(device)
-    ckpt = torch.load(checkpoint, map_location=device)
+    # See the note in train(): our own checkpoints contain numpy RNG state, so
+    # torch 2.6's weights_only=True default cannot load them.
+    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     print(f"Loaded checkpoint from epoch {ckpt['epoch']} (monitor={ckpt.get('monitor', float('nan')):.4f})")
 
